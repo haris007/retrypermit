@@ -1,0 +1,67 @@
+{
+  "tenant_id": "synthetic-demo",
+  "version": "runbook-v1",
+  "name": "RetryPermit synthetic DLQ runbook v1",
+  "auto_replay_cap": "500.00",
+  "approved_currencies": ["USD"],
+  "retry_limit": 3,
+  "action_version": "schema-v3-to-v4-v1",
+  "failure_signatures": [
+    {
+      "failure_class": "schema_drift",
+      "required_fields": ["order_id", "customer_id", "amount", "currency", "products"],
+      "description": "A valid synthetic schema-v3 order has customer_id and a numeric amount, while customerId is absent."
+    }
+  ],
+  "migration_rules": [
+    {
+      "kind": "rename_field",
+      "source_field": "customer_id",
+      "target_field": "customerId",
+      "target_type": null,
+      "default_value": null
+    },
+    {
+      "kind": "coerce_type",
+      "source_field": "amount",
+      "target_field": "amount",
+      "target_type": "string_decimal_2",
+      "default_value": null
+    }
+  ],
+  "clauses": [
+    {
+      "clause_id": "RP-A-1",
+      "page": 1,
+      "title": "Approved schema-v3 to schema-v4 repair",
+      "text": "For otherwise-valid synthetic orders, rename customer_id to customerId and serialize numeric amount with two decimal places before replay.",
+      "failure_classes": ["schema_drift"],
+      "authorized_actions": ["replay"],
+      "allowed_repairs": [
+        {
+          "kind": "rename_field",
+          "source_field": "customer_id",
+          "target_field": "customerId",
+          "target_type": null,
+          "default_value": null
+        },
+        {
+          "kind": "coerce_type",
+          "source_field": "amount",
+          "target_field": "amount",
+          "target_type": "string_decimal_2",
+          "default_value": null
+        }
+      ]
+    },
+    {
+      "clause_id": "RP-SAFE-STOP",
+      "page": 2,
+      "title": "Safe stop",
+      "text": "Unknown, low-confidence, or unauthorized messages must stop without replay.",
+      "failure_classes": ["unknown", "invalid_data", "prompt_injection", "transient_downstream"],
+      "authorized_actions": ["escalate"],
+      "allowed_repairs": []
+    }
+  ]
+}

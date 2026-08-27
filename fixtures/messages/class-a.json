@@ -1,0 +1,68 @@
+[
+  {
+    "source_message_id": "synthetic-order-001",
+    "source_topic": "orders.dlq",
+    "payload": {
+      "order_id": "ORDER-DEMO-001",
+      "customer_id": "CUSTOMER-ALDER",
+      "amount": 329.0,
+      "currency": "USD",
+      "products": [{"sku": "DEMO-CABLE", "quantity": 2}]
+    }
+  },
+  {
+    "source_message_id": "synthetic-order-002",
+    "source_topic": "orders.dlq",
+    "payload": {
+      "order_id": "ORDER-DEMO-002",
+      "customer_id": "CUSTOMER-BIRCH",
+      "amount": 74.5,
+      "currency": "USD",
+      "products": [{"sku": "DEMO-STAND", "quantity": 1}]
+    }
+  },
+  {
+    "source_message_id": "synthetic-order-003",
+    "source_topic": "orders.dlq",
+    "payload": {
+      "order_id": "ORDER-DEMO-003",
+      "customer_id": "CUSTOMER-CEDAR",
+      "amount": 499.99,
+      "currency": "USD",
+      "products": [{"sku": "DEMO-LAMP", "quantity": 3}]
+    }
+  },
+  {
+    "source_message_id": "synthetic-order-004",
+    "source_topic": "orders.dlq",
+    "payload": {
+      "order_id": "ORDER-DEMO-004",
+      "customer_id": "CUSTOMER-DOGWOOD",
+      "amount": 18.25,
+      "currency": "USD",
+      "products": [{"sku": "DEMO-CLIP", "quantity": 5}]
+    }
+  },
+  {
+    "source_message_id": "synthetic-order-005",
+    "source_topic": "orders.dlq",
+    "payload": {
+      "order_id": "ORDER-DEMO-005",
+      "customer_id": "CUSTOMER-ELM",
+      "amount": 201.1,
+      "currency": "USD",
+      "products": [{"sku": "DEMO-MAT", "quantity": 1}]
+    }
+  },
+  {
+    "source_message_id": "synthetic-order-006",
+    "source_topic": "orders.dlq",
+    "payload": {
+      "order_id": "ORDER-DEMO-006",
+      "customer_id": "CUSTOMER-FIR",
+      "amount": 450.0,
+      "currency": "USD",
+      "products": [{"sku": "DEMO-CASE", "quantity": 2}]
+    }
+  }
+]

@@ -1,0 +1,107 @@
+from __future__ import annotations
+
+from decimal import Decimal, InvalidOperation
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from retrypermit.domain.enums import (
+    FailureClass,
+    PolicyStatus,
+    RecommendedAction,
+)
+from retrypermit.domain.policy import PolicyVersion
+from retrypermit.domain.triage import Triage
+
+
+class AuthorizationDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    authorized: bool
+    error_codes: list[str] = Field(default_factory=list)
+    effective_cap: Decimal
+    amount: Decimal | None = None
+
+
+def authorize_triage(
+    payload: dict[str, object], triage: Triage, policy: PolicyVersion
+) -> AuthorizationDecision:
+    """Treat the proposal as evidence; recompute every authorization fact."""
+
+    errors: list[str] = []
+    definition = policy.definition
+    if policy.status != PolicyStatus.ACTIVE:
+        errors.append("POLICY_NOT_ACTIVE")
+    if triage.confidence < 0.70:
+        errors.append("LOW_CONFIDENCE")
+    if triage.failure_class != FailureClass.SCHEMA_DRIFT:
+        errors.append("UNSUPPORTED_FAILURE_CLASS")
+    if triage.recommended_action != RecommendedAction.REPLAY:
+        errors.append("REPLAY_NOT_RECOMMENDED")
+    if triage.contains_injection_attempt:
+        errors.append("UNTRUSTED_INSTRUCTION_DETECTED")
+
+    clause = definition.clause(triage.runbook_clause)
+    if clause is None:
+        errors.append("UNKNOWN_POLICY_CLAUSE")
+    else:
+        if clause.page != triage.runbook_page:
+            errors.append("POLICY_PAGE_MISMATCH")
+        if triage.failure_class not in clause.failure_classes:
+            errors.append("CLAUSE_CLASS_MISMATCH")
+        if triage.recommended_action not in clause.authorized_actions:
+            errors.append("CLAUSE_ACTION_MISMATCH")
+        allowed_by_clause = {repair.signature() for repair in clause.allowed_repairs}
+        if any(
+            repair.signature() not in allowed_by_clause
+            for repair in triage.proposed_repairs
+        ):
+            errors.append("CLAUSE_REPAIR_MISMATCH")
+
+    allowed_globally = {repair.signature() for repair in definition.migration_rules}
+    if any(
+        repair.signature() not in allowed_globally for repair in triage.proposed_repairs
+    ):
+        errors.append("TRANSFORM_NOT_ALLOWLISTED")
+    if not triage.proposed_repairs:
+        errors.append("NO_REPAIR_PROPOSED")
+
+    signature = next(
+        (
+            item
+            for item in definition.failure_signatures
+            if item.failure_class == FailureClass.SCHEMA_DRIFT
+        ),
+        None,
+    )
+    if signature is None or any(
+        field not in payload for field in signature.required_fields
+    ):
+        errors.append("PAYLOAD_SIGNATURE_MISMATCH")
+    amount_value = payload.get("amount")
+    if (
+        "customer_id" not in payload
+        or "customerId" in payload
+        or isinstance(amount_value, bool)
+        or not isinstance(amount_value, (int, float, Decimal))
+    ):
+        errors.append("PAYLOAD_SIGNATURE_MISMATCH")
+
+    amount: Decimal | None = None
+    try:
+        amount = Decimal(str(amount_value))
+        if not amount.is_finite() or amount <= 0:
+            raise InvalidOperation
+    except (InvalidOperation, ValueError):
+        errors.append("INVALID_AMOUNT")
+    currency = str(payload.get("currency", "")).upper()
+    if currency not in definition.approved_currencies:
+        errors.append("CURRENCY_NOT_APPROVED")
+    if amount is not None and amount > definition.effective_replay_cap:
+        errors.append("AMOUNT_OVER_EFFECTIVE_CAP")
+
+    return AuthorizationDecision(
+        authorized=not errors,
+        error_codes=list(dict.fromkeys(errors)),
+        effective_cap=definition.effective_replay_cap,
+        amount=amount,
+    )
