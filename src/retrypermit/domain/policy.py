@@ -41,6 +41,7 @@ class PolicyDefinition(BaseModel):
     auto_replay_cap: Decimal = Field(gt=0)
     approved_currencies: list[str] = Field(min_length=1)
     retry_limit: int = Field(ge=0, le=20)
+    transient_recheck_seconds: int = Field(default=300, ge=1, le=86_400)
     action_version: str = Field(min_length=1, max_length=128)
     failure_signatures: list[FailureSignature] = Field(min_length=1)
     migration_rules: list[Repair] = Field(min_length=1)

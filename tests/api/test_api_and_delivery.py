@@ -24,6 +24,8 @@ def client():
         use_in_memory_store=True,
         use_fake_model=True,
         allow_local_service_auth=True,
+        demo_recheck_seconds=0.01,
+        simulated_transient_recovery_seconds=0.01,
     )
     with TestClient(create_app(settings)) as value:
         yield value
@@ -65,26 +67,33 @@ def test_health_admin_auth_reset_and_history_preservation(client: TestClient) ->
     assert reset.status_code == 200
     second_run = reset.json()["run_id"]
     assert second_run != first_run
-    assert reset.json()["message_count"] == 6
+    assert reset.json()["message_count"] == 12
     historical = _run(runtime, first_run)
     assert historical.status == RunStatus.INACTIVE
     assert historical.active is False
 
 
-def test_api_start_runs_six_messages_end_to_end(client: TestClient) -> None:
+def test_api_start_runs_twelve_messages_end_to_end(client: TestClient) -> None:
     response = client.post(
         "/api/demo/start", json={}, headers={"X-Admin-Token": ADMIN_TOKEN}
     )
     assert response.status_code == 200
     assert response.json()["status"] == "COMPLETE"
     stats = client.get("/api/stats").json()
-    assert stats["resolved_count"] == 6
-    assert stats["dlq_depth"] == 0
+    assert stats["resolved_count"] == 9
+    assert stats["dlq_depth"] == 3
+    assert stats["deferred_total"] == 3
+    assert stats["escalated_count"] == 2
+    assert stats["quarantined_count"] == 1
     assert stats["durable_delivery"] is False
 
     messages = client.get("/api/messages").json()["messages"]
-    assert len(messages) == 6
-    assert {item["current_state"] for item in messages} == {"REPLAYED"}
+    assert len(messages) == 12
+    assert {item["current_state"] for item in messages} == {
+        "REPLAYED",
+        "ESCALATED",
+        "QUARANTINED",
+    }
     for message in messages:
         receipts = client.get(f"/api/messages/{message['message_id']}/receipts").json()[
             "items"
@@ -92,10 +101,15 @@ def test_api_start_runs_six_messages_end_to_end(client: TestClient) -> None:
         kinds = {item["kind"] for item in receipts}
         assert "pubsub_publish_attempt" in kinds
         assert "pubsub_publish_result" in kinds
-        assert any(
-            item["kind"] == "replay_result" and item["status"] == "CONFIRMED"
-            for item in receipts
-        )
+        if message["current_state"] == "REPLAYED":
+            assert any(
+                item["kind"] == "replay_result" and item["status"] == "CONFIRMED"
+                for item in receipts
+            )
+        elif message["current_state"] == "ESCALATED":
+            assert message["last_error_code"] == "BUSINESS_CONFIRMATION_REQUIRED"
+        else:
+            assert message["last_error_code"] == "UNTRUSTED_INSTRUCTION_DETECTED"
 
 
 def test_duplicate_pubsub_push_and_task_produce_one_downstream_effect(

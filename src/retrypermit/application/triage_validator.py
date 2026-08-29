@@ -22,6 +22,96 @@ class AuthorizationDecision(BaseModel):
     amount: Decimal | None = None
 
 
+class PolicyActionDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    authorized: bool
+    error_codes: list[str] = Field(default_factory=list)
+
+
+def authorize_policy_action(
+    triage: Triage,
+    policy: PolicyVersion,
+    *,
+    failure_class: FailureClass,
+    action: RecommendedAction,
+) -> PolicyActionDecision:
+    """Validate non-replay authority without treating confidence as permission."""
+
+    errors: list[str] = []
+    if policy.status != PolicyStatus.ACTIVE:
+        errors.append("POLICY_NOT_ACTIVE")
+    if triage.failure_class != failure_class:
+        errors.append("FAILURE_CLASS_MISMATCH")
+    if triage.recommended_action != action:
+        errors.append("ACTION_MISMATCH")
+    clause = policy.definition.clause(triage.runbook_clause)
+    if clause is None:
+        errors.append("UNKNOWN_POLICY_CLAUSE")
+    else:
+        if clause.page != triage.runbook_page:
+            errors.append("POLICY_PAGE_MISMATCH")
+        if failure_class not in clause.failure_classes:
+            errors.append("CLAUSE_CLASS_MISMATCH")
+        if action not in clause.authorized_actions:
+            errors.append("CLAUSE_ACTION_MISMATCH")
+    return PolicyActionDecision(
+        authorized=not errors,
+        error_codes=list(dict.fromkeys(errors)),
+    )
+
+
+def payload_contains_injection(value: object) -> bool:
+    """Conservative deterministic detector over every untrusted string value."""
+
+    if isinstance(value, dict):
+        return any(payload_contains_injection(item) for item in value.values())
+    if isinstance(value, list):
+        return any(payload_contains_injection(item) for item in value)
+    if not isinstance(value, str):
+        return False
+    normalized = " ".join(value.casefold().split())
+    return (
+        "ignore previous instructions" in normalized
+        or "approve and replay" in normalized
+        or "system prompt" in normalized
+    )
+
+
+def is_transient_inventory_503(payload: dict[str, object]) -> bool:
+    context = payload.get("failure_context")
+    return (
+        isinstance(context, dict)
+        and str(context.get("dependency", "")).casefold() == "inventory"
+        and context.get("status") == 503
+    )
+
+
+def invalid_data_resolution(
+    payload: dict[str, object], policy: PolicyVersion
+) -> tuple[str, str] | None:
+    products = payload.get("products")
+    if isinstance(products, list):
+        for item in products:
+            if isinstance(item, dict):
+                quantity = item.get("quantity")
+                if isinstance(quantity, (int, float)) and not isinstance(
+                    quantity, bool
+                ):
+                    if quantity < 0:
+                        return (
+                            "A negative quantity cannot be repaired without business intent.",
+                            "Confirm the intended non-negative quantity and resubmit the order.",
+                        )
+    currency = str(payload.get("currency", "")).upper()
+    if currency not in policy.definition.approved_currencies:
+        return (
+            f"Currency {currency or '(missing)'} is not approved by the active policy.",
+            "Confirm the intended currency and resubmit with an approved ISO currency; do not coerce it automatically.",
+        )
+    return None
+
+
 def authorize_triage(
     payload: dict[str, object], triage: Triage, policy: PolicyVersion
 ) -> AuthorizationDecision:

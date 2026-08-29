@@ -4,8 +4,14 @@ from typing import Any
 
 from retrypermit.domain.hashing import payload_hash as calculate_payload_hash
 from retrypermit.domain.replay import DownstreamSubmission
-from retrypermit.domain.errors import PayloadHashMismatchError
+from retrypermit.domain.errors import (
+    AmbiguousDownstreamOutcomeError,
+    PayloadHashMismatchError,
+)
 from retrypermit.ports.store import Store
+
+
+FAILURE_INJECTION_MESSAGE_ID = "synthetic-order-001"
 
 
 class StoreBackedDownstream:
@@ -31,10 +37,22 @@ class StoreBackedDownstream:
     ) -> DownstreamSubmission:
         if calculate_payload_hash(payload) != payload_hash:
             raise PayloadHashMismatchError("downstream payload hash is invalid")
-        return await self._store.create_or_get_downstream_effect(
+        submission = await self._store.create_or_get_downstream_effect(
             run_id=run_id,
             message_id=message_id,
             idempotency_key=idempotency_key,
             repaired_payload_hash=payload_hash,
             owner=owner,
         )
+        run = await self._store.get_run(run_id)
+        if (
+            run.inject_failure
+            and message_id == FAILURE_INJECTION_MESSAGE_ID
+            and submission.created
+        ):
+            # The effect is deliberately committed before the response is lost. A
+            # retry with the same idempotency key returns the original reference.
+            raise AmbiguousDownstreamOutcomeError(
+                "simulated 503 after the downstream effect was committed"
+            )
+        return submission

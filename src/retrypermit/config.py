@@ -55,9 +55,16 @@ class Settings(BaseSettings):
     )
     frontend_dist_path: Path = Field(default=PROJECT_ROOT / "frontend" / "dist")
     replay_lease_seconds: int = 30
+    replay_retry_base_seconds: float = 1.0
+    replay_retry_max_seconds: float = 10.0
     inbox_lease_seconds: int = 60
     model_timeout_seconds: float = 20.0
+    downstream_timeout_seconds: float = 10.0
+    policy_extraction_timeout_seconds: float = 45.0
     recovery_batch_size: int = 100
+    triage_concurrency: int = Field(default=4, ge=1, le=32)
+    demo_recheck_seconds: float = Field(default=10.0, ge=0.01, le=60.0)
+    simulated_transient_recovery_seconds: float = Field(default=10.0, ge=0.01, le=300.0)
 
     @model_validator(mode="after")
     def reject_unsafe_cloud_configuration(self) -> "Settings":

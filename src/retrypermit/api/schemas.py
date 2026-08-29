@@ -63,6 +63,10 @@ class DemoActionResponse(BaseModel):
     details: dict[str, Any] = Field(default_factory=dict)
 
 
+class PolicyMutationRequest(BaseModel):
+    actor: str = Field(default="retrypermit-demo-admin", min_length=1, max_length=128)
+
+
 class DownstreamOrderRequest(BaseModel):
     run_id: str
     message_id: str

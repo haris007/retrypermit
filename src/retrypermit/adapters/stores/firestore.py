@@ -44,6 +44,7 @@ from retrypermit.domain.messages import (
     SeedMessage,
 )
 from retrypermit.domain.policy import PolicyVersion
+from retrypermit.domain.policy_events import PolicyActivationEvent, PolicyApprovalEvent
 from retrypermit.domain.receipts import Receipt, Transition, TransitionResult
 from retrypermit.domain.replay import (
     DownstreamEffect,
@@ -159,6 +160,16 @@ class FirestoreStore:
             _document_id(run_id, "run_id")
         )
 
+    def _policy_approval_event_ref(self, event_id: str):
+        return self._client.collection("policy_approval_events").document(
+            _document_id(event_id, "policy approval event id")
+        )
+
+    def _policy_activation_event_ref(self, event_id: str):
+        return self._client.collection("policy_activation_events").document(
+            _document_id(event_id, "policy activation event id")
+        )
+
     def _message_ref(self, run_id: str, message_id: str):
         return (
             self._run_ref(run_id)
@@ -229,11 +240,51 @@ class FirestoreStore:
 
         return await install(self._client.transaction())
 
+    async def approve_policy(
+        self, tenant_id: str, version: str, actor: str
+    ) -> PolicyVersion:
+        policy_ref = self._policy_ref(tenant_id, version)
+        event_id = self._id("policy_approval")
+        event_ref = self._policy_approval_event_ref(event_id)
+
+        @async_transactional
+        async def approve(transaction: AsyncTransaction) -> PolicyVersion:
+            snapshot = await policy_ref.get(transaction=transaction)
+            if not snapshot.exists:
+                raise NotFoundError(f"policy {tenant_id}/{version} not found")
+            candidate = _load(PolicyVersion, snapshot.to_dict())
+            if candidate.status in (PolicyStatus.APPROVED, PolicyStatus.ACTIVE):
+                return candidate
+            if candidate.status != PolicyStatus.PENDING_APPROVAL:
+                raise PolicyValidationError("only a pending policy can be approved")
+            now = self._now()
+            approved = candidate.model_copy(
+                update={
+                    "status": PolicyStatus.APPROVED,
+                    "approved_at": now,
+                    "approved_by": actor,
+                }
+            )
+            event = PolicyApprovalEvent(
+                event_id=event_id,
+                tenant_id=tenant_id,
+                policy_version=version,
+                actor=actor,
+                created_at=now,
+            )
+            transaction.set(policy_ref, _dump(approved))
+            transaction.set(event_ref, _dump(event))
+            return approved
+
+        return await approve(self._client.transaction())
+
     async def activate_policy(
         self, tenant_id: str, version: str, actor: str
     ) -> PolicyVersion:
         tenant_ref = self._tenant_ref(tenant_id)
         candidate_ref = self._policy_ref(tenant_id, version)
+        event_id = self._id("policy_activation")
+        event_ref = self._policy_activation_event_ref(event_id)
 
         @async_transactional
         async def activate(transaction: AsyncTransaction) -> PolicyVersion:
@@ -276,6 +327,22 @@ class FirestoreStore:
                 },
                 merge=True,
             )
+            if previous_version != version:
+                transaction.set(
+                    event_ref,
+                    _dump(
+                        PolicyActivationEvent(
+                            event_id=event_id,
+                            tenant_id=tenant_id,
+                            previous_active_version=(
+                                str(previous_version) if previous_version else None
+                            ),
+                            new_active_version=version,
+                            actor=actor,
+                            created_at=now,
+                        )
+                    ),
+                )
             return activated
 
         return await activate(self._client.transaction())
@@ -293,6 +360,39 @@ class FirestoreStore:
         if policy.status != PolicyStatus.ACTIVE:
             raise PolicyNotActiveError("active policy pointer is inconsistent")
         return policy
+
+    async def list_policies(self, tenant_id: str) -> list[PolicyVersion]:
+        policies = [
+            _load(PolicyVersion, snapshot.to_dict())
+            async for snapshot in self._tenant_ref(tenant_id)
+            .collection("policy_versions")
+            .stream()
+        ]
+        return sorted(policies, key=lambda item: item.version)
+
+    async def list_policy_approval_events(
+        self, tenant_id: str
+    ) -> list[PolicyApprovalEvent]:
+        query = self._client.collection("policy_approval_events").where(
+            filter=FieldFilter("tenant_id", "==", tenant_id)
+        )
+        events = [
+            _load(PolicyApprovalEvent, snapshot.to_dict())
+            async for snapshot in query.stream()
+        ]
+        return sorted(events, key=lambda item: (item.created_at, item.event_id))
+
+    async def list_policy_activation_events(
+        self, tenant_id: str
+    ) -> list[PolicyActivationEvent]:
+        query = self._client.collection("policy_activation_events").where(
+            filter=FieldFilter("tenant_id", "==", tenant_id)
+        )
+        events = [
+            _load(PolicyActivationEvent, snapshot.to_dict())
+            async for snapshot in query.stream()
+        ]
+        return sorted(events, key=lambda item: (item.created_at, item.event_id))
 
     def _build_seed_messages(
         self,
@@ -488,6 +588,30 @@ class FirestoreStore:
             raise NotFoundError(f"run {run_id} not found")
         return _load(DemoRun, snapshot.to_dict())
 
+    async def set_run_inject_failure(self, run_id: str, enabled: bool) -> DemoRun:
+        run_ref = self._run_ref(run_id)
+
+        @async_transactional
+        async def update(transaction: AsyncTransaction) -> DemoRun:
+            snapshot = await run_ref.get(transaction=transaction)
+            if not snapshot.exists:
+                raise NotFoundError(f"run {run_id} not found")
+            run = _load(DemoRun, snapshot.to_dict())
+            if not run.active or run.status != RunStatus.READY:
+                raise RunConflictError(
+                    "failure injection can be changed only on an active READY run"
+                )
+            updated = run.model_copy(
+                update={
+                    "inject_failure": enabled,
+                    "updated_at": self._now(),
+                }
+            )
+            transaction.set(run_ref, _dump(updated))
+            return updated
+
+        return await update(self._client.transaction())
+
     async def mark_run_running(self, run_id: str) -> DemoRun:
         run_ref = self._run_ref(run_id)
 
@@ -594,6 +718,16 @@ class FirestoreStore:
         error_code: str | None,
         failed_stage: FailedStage | None,
         next_attempt_at: datetime | None,
+        deferral_reason: str | None,
+        recheck_at: datetime | None,
+        recheck_attempts: int | None,
+        transient_recovered: bool | None,
+        proposed_fix: str | None,
+        withheld_reason: str | None,
+        severity: str | None,
+        sla: str | None,
+        escalation_recipient: str | None,
+        quarantine_reason: str | None,
         now: datetime,
         receipt_id: str,
         operation_id: str,
@@ -646,6 +780,26 @@ class FirestoreStore:
                 "last_error_code": error_code,
                 "decision_summary": decision_summary or message.decision_summary,
                 "runbook_clause": runbook_clause or message.runbook_clause,
+                "deferral_reason": deferral_reason or message.deferral_reason,
+                "recheck_at": recheck_at or message.recheck_at,
+                "recheck_attempts": (
+                    message.recheck_attempts
+                    if recheck_attempts is None
+                    else recheck_attempts
+                ),
+                "transient_recovered": (
+                    message.transient_recovered
+                    if transient_recovered is None
+                    else transient_recovered
+                ),
+                "proposed_fix": proposed_fix or message.proposed_fix,
+                "withheld_reason": withheld_reason or message.withheld_reason,
+                "severity": severity or message.severity,
+                "sla": sla or message.sla,
+                "escalation_recipient": (
+                    escalation_recipient or message.escalation_recipient
+                ),
+                "quarantine_reason": quarantine_reason or message.quarantine_reason,
                 "next_transition_sequence": message.next_transition_sequence + 1,
                 "updated_at": now,
             }
@@ -684,6 +838,16 @@ class FirestoreStore:
         error_code: str | None = None,
         failed_stage: FailedStage | None = None,
         next_attempt_at: datetime | None = None,
+        deferral_reason: str | None = None,
+        recheck_at: datetime | None = None,
+        recheck_attempts: int | None = None,
+        transient_recovered: bool | None = None,
+        proposed_fix: str | None = None,
+        withheld_reason: str | None = None,
+        severity: str | None = None,
+        sla: str | None = None,
+        escalation_recipient: str | None = None,
+        quarantine_reason: str | None = None,
     ) -> TransitionResult:
         receipt_id = self._id("rcpt")
         operation_id = self._id("op")
@@ -718,6 +882,16 @@ class FirestoreStore:
                 error_code=error_code,
                 failed_stage=failed_stage,
                 next_attempt_at=next_attempt_at,
+                deferral_reason=deferral_reason,
+                recheck_at=recheck_at,
+                recheck_attempts=recheck_attempts,
+                transient_recovered=transient_recovered,
+                proposed_fix=proposed_fix,
+                withheld_reason=withheld_reason,
+                severity=severity,
+                sla=sla,
+                escalation_recipient=escalation_recipient,
+                quarantine_reason=quarantine_reason,
                 now=now,
                 receipt_id=receipt_id,
                 operation_id=operation_id,
@@ -796,6 +970,20 @@ class FirestoreStore:
             async for snapshot in message_ref.collection("receipts").stream()
         ]
         return sorted(receipts, key=lambda item: (item.created_at, item.receipt_id))
+
+    async def count_recorded_deliveries(self, run_id: str, message_id: str) -> int:
+        if not (await self._message_ref(run_id, message_id).get()).exists:
+            raise NotFoundError(f"message {run_id}/{message_id} not found")
+        count = 0
+        async for delivery_snapshot in (
+            self._run_ref(run_id).collection("deliveries").stream()
+        ):
+            delivery = _load(DeliveryRecord, delivery_snapshot.to_dict())
+            if delivery.source_message_id != message_id:
+                continue
+            async for _ in delivery_snapshot.reference.collection("attempts").stream():
+                count += 1
+        return count
 
     async def register_delivery(
         self,
@@ -1519,6 +1707,16 @@ class FirestoreStore:
                 error_code=None,
                 failed_stage=None,
                 next_attempt_at=None,
+                deferral_reason=None,
+                recheck_at=None,
+                recheck_attempts=None,
+                transient_recovered=None,
+                proposed_fix=None,
+                withheld_reason=None,
+                severity=None,
+                sla=None,
+                escalation_recipient=None,
+                quarantine_reason=None,
                 now=now,
                 receipt_id=transition_receipt_id,
                 operation_id=transition_operation_id,
@@ -1697,6 +1895,16 @@ class FirestoreStore:
                 error_code=error_code,
                 failed_stage=FailedStage.REPLAY,
                 next_attempt_at=retry_at,
+                deferral_reason=None,
+                recheck_at=None,
+                recheck_attempts=None,
+                transient_recovered=None,
+                proposed_fix=None,
+                withheld_reason=None,
+                severity=None,
+                sla=None,
+                escalation_recipient=None,
+                quarantine_reason=None,
                 now=now,
                 receipt_id=transition_receipt_id,
                 operation_id=transition_operation_id,
@@ -1843,6 +2051,16 @@ class FirestoreStore:
                     else None
                 ),
                 next_attempt_at=None,
+                deferral_reason=None,
+                recheck_at=None,
+                recheck_attempts=None,
+                transient_recovered=None,
+                proposed_fix=None,
+                withheld_reason=None,
+                severity=None,
+                sla=None,
+                escalation_recipient=None,
+                quarantine_reason=None,
                 now=now,
                 receipt_id=transition_receipt_id,
                 operation_id=transition_operation_id,
@@ -1962,7 +2180,8 @@ class FirestoreStore:
             async for snapshot in run_ref.collection("messages").stream():
                 message = _load(MessageRecord, snapshot.to_dict())
                 if (
-                    message.current_state == MessageState.FAILED_RETRYABLE
+                    message.current_state
+                    in (MessageState.FAILED_RETRYABLE, MessageState.DEFERRED)
                     and message.next_attempt_at is not None
                     and _utc(message.next_attempt_at) <= cutoff
                 ):

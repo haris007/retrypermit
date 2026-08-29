@@ -3,6 +3,7 @@ from decimal import Decimal
 
 import pytest
 
+from retrypermit.adapters.downstream.store_backed import StoreBackedDownstream
 from retrypermit.adapters.models.fake import DeterministicFakeModelProvider
 from retrypermit.adapters.policies.seeded_json import (
     SeededPolicyProvider,
@@ -83,7 +84,11 @@ async def test_over_500_escalates_under_v1_and_replays_under_active_v2() -> None
         seeds=[seed],
         run_id="policy-v1-cap",
     )
-    orchestrator = RetryPermitOrchestrator(store, DeterministicFakeModelProvider())
+    orchestrator = RetryPermitOrchestrator(
+        store,
+        DeterministicFakeModelProvider(),
+        StoreBackedDownstream(store),
+    )
     v1_result = await orchestrator.run_message(v1_run.run_id, seed.source_message_id)
     assert v1_result.current_state == MessageState.ESCALATED
     assert await store.list_downstream_effects(v1_run.run_id) == []

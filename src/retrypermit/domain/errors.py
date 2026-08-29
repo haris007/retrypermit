@@ -38,3 +38,9 @@ class LeaseNotOwnedError(RetryPermitError):
 
 class RunConflictError(RetryPermitError):
     code = "RUN_CONFLICT"
+
+
+class AmbiguousDownstreamOutcomeError(RetryPermitError):
+    """The downstream effect exists, but its response was not received."""
+
+    code = "DOWNSTREAM_RESPONSE_LOST_AFTER_EFFECT"
