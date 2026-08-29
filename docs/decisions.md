@@ -171,6 +171,23 @@ The current 12-message fixture does not contain the historical $750 Phase 2 orde
 
 The completed local Phase 5 verification reported `42 passed, 2 skipped, 1 upstream deprecation warning`; Ruff check/format, the frontend production build, Markdown target check, secret-pattern scan, and three-scenario freeze rehearsal all passed. The skipped deployed vertical-slice and real-Gemini tests are not counted as passing and remain the explicit final cloud gate.
 
+## ADR-016 — A policy schema change invalidates stored policy hashes, and startup fails closed
+
+**Status:** Accepted
+**Date:** 2026-08-29
+
+Deploying the Phase 3/4 code onto the Firestore database that Phase 2 had populated failed at container startup. `PolicyService.bootstrap()` calls `get_active_policy`, which loads the stored `PolicyVersion`; its model validator recomputes `policy_definition_hash(definition)` and rejected the document with `extracted policy hash does not match policy definition`. Cloud Run then reported that the container never listened on `PORT`.
+
+The cause is not a defect. Phase 3 added `transient_recheck_seconds` to `PolicyDefinition` and expanded `clauses` and `failure_signatures` for the four outcome classes. A Phase 2 document carries neither the new field nor the new clauses, so parsing it under the current schema fills in the default `300`, which changes the canonical JSON, which changes the hash. The integrity check is doing exactly what it exists to do: refusing to treat a definition as authorized when the stored hash does not attest to the bytes being loaded. Loosening that check to tolerate a mismatch would remove the property the whole policy design rests on.
+
+The consequence is a real operational constraint that this repository had not previously stated: **any change to `PolicyDefinition` invalidates every stored policy version.** Stored runs, messages, transitions, receipts, ledgers, and effects were unaffected — all seven Phase 2 runs and their messages parsed cleanly under the current schema. Only the two `tenants/synthetic-demo/policy_versions` documents were incompatible.
+
+The chosen remedy was to delete the two stale policy documents and let the application's own cold-start path reseed. `bootstrap()` seeds and activates the fixture policy only when no active policy exists, so the new revision installed `runbook-v1` from `fixtures/policies/runbook-v1.json` and recorded a normal activation event attributed to `retrypermit-system-bootstrap`. The documents were backed up first and are reproducible from the checked-in fixtures; the append-only approval and activation event collections are stored separately and were not touched.
+
+Rewriting the stored documents with recomputed hashes was rejected. That would mint a valid-looking hash over a definition no operator ever approved, which is precisely the forgery the hash exists to prevent.
+
+A production system needs an explicit policy-migration step: version the definition schema, and on a breaking change require re-extraction and re-approval through the audited path rather than silently rehashing. Deleting and reseeding is acceptable here only because every policy is synthetic and checked in.
+
 ## Truthful claim checklist
 
 The following statements remain false until the corresponding evidence exists:
