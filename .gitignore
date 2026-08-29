@@ -1,6 +1,7 @@
 .DS_Store
 .env
 .venv/
+.venv*/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -11,3 +12,4 @@ htmlcov/
 frontend/node_modules/
 frontend/dist/
 *.log
+tmp/

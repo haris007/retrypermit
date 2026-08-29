@@ -51,7 +51,7 @@ async function request(
   const headers = new Headers(init.headers);
   headers.set("Accept", "application/json");
 
-  if (init.body !== undefined) {
+  if (init.body !== undefined && !(init.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
   }
 
@@ -109,6 +109,8 @@ export const api = {
     request(`/api/messages/${encodeURIComponent(messageId)}/transitions`),
   receipts: (messageId: string) =>
     request(`/api/messages/${encodeURIComponent(messageId)}/receipts`),
+  proof: (messageId: string) =>
+    request(`/api/messages/${encodeURIComponent(messageId)}/proof`),
   policies: () => request("/api/policies"),
   reset: (adminToken: string) =>
     request("/api/demo/reset", { method: "POST", body: "{}" }, adminToken),
@@ -116,6 +118,29 @@ export const api = {
     request("/api/demo/seed", { method: "POST", body: "{}" }, adminToken),
   start: (adminToken: string) =>
     request("/api/demo/start", { method: "POST", body: "{}" }, adminToken),
+  startWithFailure: (adminToken: string) =>
+    request(
+      "/api/demo/start-with-failure",
+      { method: "POST", body: "{}" },
+      adminToken,
+    ),
+  extractPolicy: (file: File, adminToken: string) => {
+    const body = new FormData();
+    body.set("file", file);
+    return request("/api/policies/extract", { method: "POST", body }, adminToken);
+  },
+  approvePolicy: (version: string, adminToken: string) =>
+    request(
+      `/api/policies/${encodeURIComponent(version)}/approve`,
+      { method: "POST", body: JSON.stringify({ actor: "retrypermit-demo-admin" }) },
+      adminToken,
+    ),
+  activatePolicy: (version: string, adminToken: string) =>
+    request(
+      `/api/policies/${encodeURIComponent(version)}/activate`,
+      { method: "POST", body: JSON.stringify({ actor: "retrypermit-demo-admin" }) },
+      adminToken,
+    ),
 };
 
 export function record(value: unknown): JsonRecord {

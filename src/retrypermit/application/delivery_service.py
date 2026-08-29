@@ -197,14 +197,27 @@ class DeliveryService:
                 run_id, inbox_id, InboxStatus.COMPLETED, owner=worker_id
             )
         else:
-            await self._store.update_inbox_status(
+            retry_at = message.next_attempt_at or self._clock.now() + self._retry_delay
+            retry_inbox = await self._store.update_inbox_status(
                 run_id,
                 inbox_id,
                 InboxStatus.RETRYABLE,
-                next_attempt_at=message.next_attempt_at
-                or self._clock.now() + self._retry_delay,
+                next_attempt_at=retry_at,
                 error_code=message.last_error_code or "PROCESSING_INCOMPLETE",
                 owner=worker_id,
+            )
+            task_name = self._task_name(
+                "process", run_id, inbox_id, retry_inbox.attempt_count
+            )
+            await self._schedule_for_message(
+                run_id=run_id,
+                message_id=message.message_id,
+                task_name=task_name,
+                endpoint="/internal/tasks/process",
+                body={"run_id": run_id, "inbox_id": inbox_id},
+                trace_id=trace_id,
+                schedule_time=retry_at,
+                inbox=retry_inbox,
             )
         logger.info(
             "inbox_processing_finished",

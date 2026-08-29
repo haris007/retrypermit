@@ -6,12 +6,15 @@ class MessageState(StrEnum):
     TRIAGING = "TRIAGING"
     TRIAGED = "TRIAGED"
     PLANNED = "PLANNED"
+    DEFERRED = "DEFERRED"
+    RECHECKING = "RECHECKING"
     REPAIRING = "REPAIRING"
     REPLAYING = "REPLAYING"
     REPLAYED = "REPLAYED"
     FAILED_RETRYABLE = "FAILED_RETRYABLE"
     FAILED_FINAL = "FAILED_FINAL"
     ESCALATED = "ESCALATED"
+    QUARANTINED = "QUARANTINED"
 
 
 class FailedStage(StrEnum):
@@ -70,6 +73,10 @@ class ReceiptKind(StrEnum):
     TASK_SCHEDULE_RESULT = "task_schedule_result"
     DELIVERY = "delivery"
     POLICY = "policy"
+    DEFERRAL = "deferral"
+    RECHECK = "recheck"
+    ESCALATION = "escalation"
+    REFUSAL = "refusal"
 
 
 class ReceiptStatus(StrEnum):

@@ -1,6 +1,6 @@
 # RetryPermit Google Cloud setup — learning guide
 
-**Configured:** 2026-08-26  
+**Configured:** 2026-08-26; Phase 2 verified 2026-08-27
 **Project:** `retrypermit-hackathon-2026`  
 **Region:** `us-central1`  
 **Live demo:** [RetryPermit recovery console](https://retrypermit-vm5aevgdva-uc.a.run.app)
@@ -87,7 +87,7 @@ The `orders.dlq` topic feeds the active `orders-dlq-push` subscription. It pushe
 
 ![Cloud Tasks queue](media/cloud-tasks-queue.png)
 
-`retrypermit-processing` is a running push queue in `us-central1`. Task names are deterministic, and workers are called with the `retrypermit-tasks` OIDC identity. The queue is empty in the screenshot because every acceptance-run task completed.
+`retrypermit-processing` is a running push queue in `us-central1`. Task names are deterministic, and workers are called with the `retrypermit-tasks` OIDC identity. Phase 2 also schedules a future per-message task at `next_attempt_at` after a retryable replay failure. The queue is empty in the screenshot because every acceptance-run task completed.
 
 ## 8. Scheduled recovery
 
@@ -109,7 +109,7 @@ The default Firestore Standard database is in `us-central1` and received the liv
 - `messages`
 - `replay_ledger`
 
-The independent acceptance-test query found six message documents and exactly six unique downstream-effect documents.
+Top-level `policy_approval_events` and `policy_activation_events` collections record the actor and version lifecycle. The independent Phase 2 acceptance queries found five unique downstream effects in the v1 failure run and six in the v2 run.
 
 ## 10. Completed live run
 
@@ -123,12 +123,26 @@ The final clean acceptance run completed in about 17 seconds:
 - persisted Firestore run status: **COMPLETE**
 - confirmed unique downstream effects: **6**
 
+## 11. Phase 2 failure proof and policy v2
+
+![Phase 2 runbook v2 completion](media/cloud-phase2-v2-complete.png)
+
+The credentialed Phase 2 test first activated v1 and started the injected lost-response scenario. The designated request committed its simulated downstream effect and then returned a deliberate 503. A future Cloud Task retried the same idempotency key and received the original reference. The live proof query reported:
+
+- deliveries recorded by RetryPermit: **1**
+- execution attempts: **2**
+- downstream requests: **2**
+- unique downstream effects: **1**
+- ledger: **CONFIRMED**
+
+V1 resolved five orders and escalated the synthetic $750 order. Gemini then extracted `fixtures/dlq-runbook-v2.pdf` into the strict schema. After separate audited approval and activation, a new run replayed all six orders with no code change. The active console now shows `runbook-v2`, source `gemini_pdf_extraction`, effective cap `$2,000`, and zero DLQ depth.
+
 Verification commands:
 
 ```text
-tests/deployed/test_deployed_vertical_slice.py  1 passed in 19.78s
-tests/deployed/test_real_gemini.py               1 passed in 5.94s
-local suite                                      27 passed, 2 intentionally skipped
+tests/deployed/test_deployed_vertical_slice.py  1 passed in 50.67s
+direct ADK/Gemini v2 PDF extraction             runbook-v2, $2,000, 2 clauses
+local suite                                      35 passed, 2 intentionally skipped
 ```
 
 ## Expected hackathon cost

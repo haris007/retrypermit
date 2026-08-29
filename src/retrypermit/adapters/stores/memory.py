@@ -42,6 +42,7 @@ from retrypermit.domain.messages import (
     SeedMessage,
 )
 from retrypermit.domain.policy import PolicyVersion
+from retrypermit.domain.policy_events import PolicyActivationEvent, PolicyApprovalEvent
 from retrypermit.domain.receipts import Receipt, Transition, TransitionResult
 from retrypermit.domain.replay import (
     DownstreamEffect,
@@ -79,6 +80,8 @@ class MemoryStore:
         self._lock = asyncio.Lock()
         self._policies: dict[tuple[str, str], PolicyVersion] = {}
         self._active_policy: dict[str, str] = {}
+        self._policy_approval_events: list[PolicyApprovalEvent] = []
+        self._policy_activation_events: list[PolicyActivationEvent] = []
         self._runs: dict[str, DemoRun] = {}
         self._messages: dict[str, dict[str, MessageRecord]] = {}
         self._transitions: dict[tuple[str, str], list[Transition]] = {}
@@ -124,6 +127,39 @@ class MemoryStore:
             self._policies[key] = _copy(policy)
             return _copy(policy)
 
+    async def approve_policy(
+        self, tenant_id: str, version: str, actor: str
+    ) -> PolicyVersion:
+        async with self._lock:
+            key = (tenant_id, version)
+            try:
+                candidate = self._policies[key]
+            except KeyError as exc:
+                raise NotFoundError(f"policy {tenant_id}/{version} not found") from exc
+            if candidate.status in (PolicyStatus.APPROVED, PolicyStatus.ACTIVE):
+                return _copy(candidate)
+            if candidate.status != PolicyStatus.PENDING_APPROVAL:
+                raise PolicyValidationError("only a pending policy can be approved")
+            now = self._clock.now()
+            approved = candidate.model_copy(
+                update={
+                    "status": PolicyStatus.APPROVED,
+                    "approved_at": now,
+                    "approved_by": actor,
+                }
+            )
+            self._policies[key] = approved
+            self._policy_approval_events.append(
+                PolicyApprovalEvent(
+                    event_id=self._id("policy_approval"),
+                    tenant_id=tenant_id,
+                    policy_version=version,
+                    actor=actor,
+                    created_at=now,
+                )
+            )
+            return _copy(approved)
+
     async def activate_policy(
         self, tenant_id: str, version: str, actor: str
     ) -> PolicyVersion:
@@ -152,6 +188,17 @@ class MemoryStore:
             )
             self._policies[key] = activated
             self._active_policy[tenant_id] = version
+            if previous_version != version:
+                self._policy_activation_events.append(
+                    PolicyActivationEvent(
+                        event_id=self._id("policy_activation"),
+                        tenant_id=tenant_id,
+                        previous_active_version=previous_version,
+                        new_active_version=version,
+                        actor=actor,
+                        created_at=now,
+                    )
+                )
             return _copy(activated)
 
     async def get_active_policy(self, tenant_id: str) -> PolicyVersion:
@@ -163,6 +210,34 @@ class MemoryStore:
             if policy.status != PolicyStatus.ACTIVE:
                 raise PolicyNotActiveError("active policy pointer is inconsistent")
             return _copy(policy)
+
+    async def list_policies(self, tenant_id: str) -> list[PolicyVersion]:
+        async with self._lock:
+            return [
+                _copy(policy)
+                for (policy_tenant, _), policy in sorted(self._policies.items())
+                if policy_tenant == tenant_id
+            ]
+
+    async def list_policy_approval_events(
+        self, tenant_id: str
+    ) -> list[PolicyApprovalEvent]:
+        async with self._lock:
+            return [
+                _copy(event)
+                for event in self._policy_approval_events
+                if event.tenant_id == tenant_id
+            ]
+
+    async def list_policy_activation_events(
+        self, tenant_id: str
+    ) -> list[PolicyActivationEvent]:
+        async with self._lock:
+            return [
+                _copy(event)
+                for event in self._policy_activation_events
+                if event.tenant_id == tenant_id
+            ]
 
     async def reset_run(
         self,
@@ -263,6 +338,22 @@ class MemoryStore:
         async with self._lock:
             return _copy(self._run_locked(run_id))
 
+    async def set_run_inject_failure(self, run_id: str, enabled: bool) -> DemoRun:
+        async with self._lock:
+            run = self._run_locked(run_id)
+            if not run.active or run.status != RunStatus.READY:
+                raise RunConflictError(
+                    "failure injection can be changed only on an active READY run"
+                )
+            updated = run.model_copy(
+                update={
+                    "inject_failure": enabled,
+                    "updated_at": self._clock.now(),
+                }
+            )
+            self._runs[run_id] = updated
+            return _copy(updated)
+
     async def mark_run_running(self, run_id: str) -> DemoRun:
         async with self._lock:
             run = self._run_locked(run_id)
@@ -303,6 +394,7 @@ class MemoryStore:
                     "runbook_clause": analysis.runbook_clause,
                     "runbook_page": analysis.runbook_page,
                     "decision_summary": analysis.decision_summary,
+                    "proposed_fix": analysis.proposed_fix,
                     "evidence": list(analysis.evidence),
                     "contains_injection_attempt": analysis.contains_injection_attempt,
                     "recommended_action": analysis.recommended_action,
@@ -352,6 +444,16 @@ class MemoryStore:
         error_code: str | None,
         failed_stage: FailedStage | None,
         next_attempt_at: datetime | None,
+        deferral_reason: str | None,
+        recheck_at: datetime | None,
+        recheck_attempts: int | None,
+        transient_recovered: bool | None,
+        proposed_fix: str | None,
+        withheld_reason: str | None,
+        severity: str | None,
+        sla: str | None,
+        escalation_recipient: str | None,
+        quarantine_reason: str | None,
     ) -> TransitionResult:
         message = self._message_locked(run_id, message_id)
         ensure_transition(message.current_state, new_state, message.failed_stage)
@@ -401,6 +503,26 @@ class MemoryStore:
                 "last_error_code": error_code,
                 "decision_summary": decision_summary or message.decision_summary,
                 "runbook_clause": runbook_clause or message.runbook_clause,
+                "deferral_reason": deferral_reason or message.deferral_reason,
+                "recheck_at": recheck_at or message.recheck_at,
+                "recheck_attempts": (
+                    message.recheck_attempts
+                    if recheck_attempts is None
+                    else recheck_attempts
+                ),
+                "transient_recovered": (
+                    message.transient_recovered
+                    if transient_recovered is None
+                    else transient_recovered
+                ),
+                "proposed_fix": proposed_fix or message.proposed_fix,
+                "withheld_reason": withheld_reason or message.withheld_reason,
+                "severity": severity or message.severity,
+                "sla": sla or message.sla,
+                "escalation_recipient": (
+                    escalation_recipient or message.escalation_recipient
+                ),
+                "quarantine_reason": quarantine_reason or message.quarantine_reason,
                 "next_transition_sequence": message.next_transition_sequence + 1,
                 "updated_at": now,
             }
@@ -423,6 +545,16 @@ class MemoryStore:
         error_code: str | None = None,
         failed_stage: FailedStage | None = None,
         next_attempt_at: datetime | None = None,
+        deferral_reason: str | None = None,
+        recheck_at: datetime | None = None,
+        recheck_attempts: int | None = None,
+        transient_recovered: bool | None = None,
+        proposed_fix: str | None = None,
+        withheld_reason: str | None = None,
+        severity: str | None = None,
+        sla: str | None = None,
+        escalation_recipient: str | None = None,
+        quarantine_reason: str | None = None,
     ) -> TransitionResult:
         async with self._lock:
             result = self._transition_locked(
@@ -436,6 +568,16 @@ class MemoryStore:
                 error_code=error_code,
                 failed_stage=failed_stage,
                 next_attempt_at=next_attempt_at,
+                deferral_reason=deferral_reason,
+                recheck_at=recheck_at,
+                recheck_attempts=recheck_attempts,
+                transient_recovered=transient_recovered,
+                proposed_fix=proposed_fix,
+                withheld_reason=withheld_reason,
+                severity=severity,
+                sla=sla,
+                escalation_recipient=escalation_recipient,
+                quarantine_reason=quarantine_reason,
             )
             if is_terminal(new_state):
                 self._maybe_complete_run_locked(run_id)
@@ -468,6 +610,16 @@ class MemoryStore:
                     key=lambda receipt: (receipt.created_at, receipt.receipt_id),
                 )
             ]
+
+    async def count_recorded_deliveries(self, run_id: str, message_id: str) -> int:
+        async with self._lock:
+            self._message_locked(run_id, message_id)
+            return sum(
+                len(self._delivery_attempts.get((run_id, delivery.delivery_key), []))
+                for (delivery_run_id, _), delivery in self._deliveries.items()
+                if delivery_run_id == run_id
+                and delivery.source_message_id == message_id
+            )
 
     async def register_delivery(
         self,
@@ -1010,6 +1162,16 @@ class MemoryStore:
                 error_code=None,
                 failed_stage=None,
                 next_attempt_at=None,
+                deferral_reason=None,
+                recheck_at=None,
+                recheck_attempts=None,
+                transient_recovered=None,
+                proposed_fix=None,
+                withheld_reason=None,
+                severity=None,
+                sla=None,
+                escalation_recipient=None,
+                quarantine_reason=None,
             )
             receipt_bucket[result_receipt.receipt_id] = _copy(result_receipt)
             self._maybe_complete_run_locked(run_id)
@@ -1091,6 +1253,16 @@ class MemoryStore:
                 error_code=error_code,
                 failed_stage=FailedStage.REPLAY,
                 next_attempt_at=next_attempt_at,
+                deferral_reason=None,
+                recheck_at=None,
+                recheck_attempts=None,
+                transient_recovered=None,
+                proposed_fix=None,
+                withheld_reason=None,
+                severity=None,
+                sla=None,
+                escalation_recipient=None,
+                quarantine_reason=None,
             )
             self._ledgers[key] = updated
             self._receipts[(run_id, entry.message_id)][result_receipt.receipt_id] = (
@@ -1183,6 +1355,16 @@ class MemoryStore:
                     else None
                 ),
                 next_attempt_at=None,
+                deferral_reason=None,
+                recheck_at=None,
+                recheck_attempts=None,
+                transient_recovered=None,
+                proposed_fix=None,
+                withheld_reason=None,
+                severity=None,
+                sla=None,
+                escalation_recipient=None,
+                quarantine_reason=None,
             )
             self._ledgers[key] = updated
             self._receipts[(run_id, entry.message_id)][result_receipt.receipt_id] = (
@@ -1324,7 +1506,8 @@ class MemoryStore:
                 for run_messages in self._messages.values()
                 for message in run_messages.values()
                 if self._runs[message.run_id].active
-                and message.current_state == MessageState.FAILED_RETRYABLE
+                and message.current_state
+                in (MessageState.FAILED_RETRYABLE, MessageState.DEFERRED)
                 and message.next_attempt_at is not None
                 and message.next_attempt_at <= now
             ]

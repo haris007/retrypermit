@@ -60,6 +60,7 @@ class Triage(BaseModel):
     proposed_repairs: list[Repair] = Field(default_factory=list, max_length=16)
     recommended_action: RecommendedAction
     decision_summary: str = Field(min_length=1, max_length=1_000)
+    proposed_fix: str | None = Field(default=None, max_length=1_000)
 
 
 class PolicyClauseContext(BaseModel):

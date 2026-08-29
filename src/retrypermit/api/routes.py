@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -8,7 +9,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import FastAPI, Query, Request, Response
+from fastapi import FastAPI, File, Query, Request, Response, UploadFile
 from pydantic import ValidationError
 
 from retrypermit.api.auth import require_admin, verify_service_identity
@@ -16,6 +17,7 @@ from retrypermit.api.schemas import (
     DeliveryPayload,
     DemoActionResponse,
     DownstreamOrderRequest,
+    PolicyMutationRequest,
     PubSubEnvelope,
     RecoveryRequest,
     TaskProcessRequest,
@@ -28,8 +30,9 @@ from retrypermit.domain.enums import (
     ReceiptStatus,
     RunStatus,
 )
-from retrypermit.domain.errors import NotFoundError
+from retrypermit.domain.errors import NotFoundError, PolicyValidationError
 from retrypermit.domain.receipts import Receipt
+from retrypermit.domain.state_machine import is_terminal
 from retrypermit.errors import ConflictError, DependencyUnavailable, RetryPermitError
 from retrypermit.runtime import Runtime
 
@@ -89,6 +92,162 @@ async def _record_publish_receipt(
     )
 
 
+async def _start_active_demo(
+    runtime: Runtime, *, trace_id: str, inject_failure: bool
+) -> DemoActionResponse:
+    run = await runtime.demo.get_active()
+    run = await runtime.store.set_run_inject_failure(run.run_id, inject_failure)
+    await runtime.store.mark_run_running(run.run_id)
+    current = await runtime.store.list_messages(run.run_id)
+    local_inbox_ids: list[str] = []
+
+    for message in current:
+        if message.current_state != MessageState.RECEIVED:
+            continue
+        operation_id = f"op_{uuid.uuid4().hex}"
+        await _record_publish_receipt(
+            runtime,
+            message=message,
+            operation_id=operation_id,
+            status=ReceiptStatus.STARTED,
+            kind=ReceiptKind.PUBSUB_PUBLISH_ATTEMPT,
+            trace_id=trace_id,
+        )
+        body = {
+            "run_id": run.run_id,
+            "message_id": message.message_id,
+            "source_topic": message.source_topic,
+            "payload": message.original_payload,
+        }
+        try:
+            transport_id = await runtime.publisher.publish(
+                topic=runtime.settings.pubsub_topic,
+                payload=body,
+                attributes={
+                    "run_id": run.run_id,
+                    "source_message_id": message.message_id,
+                    "synthetic": "true",
+                },
+            )
+        except Exception as exc:
+            await _record_publish_receipt(
+                runtime,
+                message=message,
+                operation_id=operation_id,
+                status=ReceiptStatus.FAILED,
+                kind=ReceiptKind.PUBSUB_PUBLISH_RESULT,
+                trace_id=trace_id,
+                error_code="PUBSUB_PUBLISH_FAILED",
+            )
+            raise DependencyUnavailable(
+                "PUBSUB_PUBLISH_FAILED",
+                "A synthetic message could not be published.",
+                trace_id,
+            ) from exc
+        await _record_publish_receipt(
+            runtime,
+            message=message,
+            operation_id=operation_id,
+            status=ReceiptStatus.CONFIRMED,
+            kind=ReceiptKind.PUBSUB_PUBLISH_RESULT,
+            trace_id=trace_id,
+            transport_message_id=transport_id,
+        )
+
+        if runtime.settings.use_in_memory_store:
+            registration = await runtime.delivery.register(
+                run_id=run.run_id,
+                subscription="local-inline-bypass",
+                source_message_id=message.message_id,
+                transport_message_id=transport_id,
+                source_topic=message.source_topic,
+                payload=message.original_payload,
+                trace_id=trace_id,
+            )
+            local_inbox_ids.append(registration.inbox.inbox_id)
+
+    if local_inbox_ids:
+        await asyncio.gather(
+            *(
+                runtime.delivery.process_inbox(
+                    run_id=run.run_id,
+                    inbox_id=inbox_id,
+                    worker_id=f"local_{uuid.uuid4().hex}",
+                    trace_id=trace_id,
+                )
+                for inbox_id in local_inbox_ids
+            )
+        )
+
+    # The local fake executes recorded task intents in schedule order. This is a
+    # deterministic demo harness for per-message tasks, not a production sweep loop.
+    if runtime.settings.use_in_memory_store:
+        handled_tasks: set[str] = set()
+        for _ in range(96):
+            latest = await runtime.store.list_messages(run.run_id)
+            if all(is_terminal(item.current_state) for item in latest):
+                break
+            recorded = getattr(runtime.scheduler, "tasks", {})
+            pending = [
+                (name, task)
+                for name, task in recorded.items()
+                if name not in handled_tasks
+                and task.get("body", {}).get("run_id") == run.run_id
+            ]
+            if not pending:
+                break
+            task_name, task = min(
+                pending,
+                key=lambda item: (item[1]["schedule_time"], item[0]),
+            )
+            delay = max(
+                0.0,
+                (task["schedule_time"] - datetime.now(UTC)).total_seconds(),
+            )
+            if delay:
+                await asyncio.sleep(delay)
+            handled_tasks.add(task_name)
+            body = task["body"]
+            if task["endpoint"] == "/internal/tasks/process":
+                await runtime.delivery.process_inbox(
+                    run_id=body["run_id"],
+                    inbox_id=body["inbox_id"],
+                    worker_id=f"local_task_{uuid.uuid4().hex}",
+                    trace_id=trace_id,
+                )
+            elif task["endpoint"] == "/internal/tasks/recover-message":
+                await runtime.delivery.process_recovery(
+                    run_id=body["run_id"],
+                    message_id=body["message_id"],
+                    worker_id=f"local_recovery_{uuid.uuid4().hex}",
+                    trace_id=trace_id,
+                )
+
+    final_run = await runtime.store.get_run(run.run_id)
+    return DemoActionResponse(
+        run_id=run.run_id,
+        status=final_run.status.value,
+        message_count=len(current),
+        details={
+            "transport": (
+                "local recorded-task simulation, non-durable"
+                if runtime.settings.use_in_memory_store
+                else "Google Cloud Pub/Sub"
+            ),
+            "inject_failure": inject_failure,
+            "failure_semantics": (
+                "one simulated 503 after a real idempotent effect is committed"
+                if inject_failure
+                else "none"
+            ),
+            "synthetic_data": True,
+            "simulated_downstream": True,
+            "recheck_strategy": "per-message scheduled tasks; recovery scheduler is a safety net",
+            "demo_recheck_seconds": runtime.settings.demo_recheck_seconds,
+        },
+    )
+
+
 def register_routes(app: FastAPI) -> None:
     @app.get("/health")
     async def health(request: Request) -> dict[str, Any]:
@@ -123,6 +282,15 @@ def register_routes(app: FastAPI) -> None:
         resolved = sum(
             message.current_state == MessageState.REPLAYED for message in messages
         )
+        state_counts = {
+            state.value: sum(message.current_state == state for message in messages)
+            for state in MessageState
+        }
+        deferred_total = sum(
+            message.failure_class is not None
+            and message.failure_class.value == "transient_downstream"
+            for message in messages
+        )
         end = run.completed_at or datetime.now(UTC)
         elapsed = (
             max(0.0, (end - run.started_at).total_seconds()) if run.started_at else 0.0
@@ -134,6 +302,12 @@ def register_routes(app: FastAPI) -> None:
             "total": len(messages),
             "dlq_depth": len(messages) - resolved,
             "resolved_count": resolved,
+            "replayed_count": state_counts[MessageState.REPLAYED.value],
+            "deferred_count": state_counts[MessageState.DEFERRED.value],
+            "deferred_total": deferred_total,
+            "escalated_count": state_counts[MessageState.ESCALATED.value],
+            "quarantined_count": state_counts[MessageState.QUARANTINED.value],
+            "state_counts": state_counts,
             "elapsed_seconds": round(elapsed, 3),
             "active_policy_version": run.active_policy_version,
             "synthetic_data": True,
@@ -144,6 +318,12 @@ def register_routes(app: FastAPI) -> None:
                 if runtime.settings.use_fake_model
                 else runtime.settings.gemini_model
             ),
+            "demo_recheck_seconds": (
+                runtime.settings.demo_recheck_seconds
+                if runtime.settings.demo_mode
+                else None
+            ),
+            "recheck_mode": "per-message scheduled task with Scheduler recovery net",
         }
 
     @app.get("/api/messages")
@@ -196,13 +376,85 @@ def register_routes(app: FastAPI) -> None:
             "items": [_dump(item) for item in items],
         }
 
+    @app.get("/api/messages/{message_id}/proof")
+    async def message_proof(
+        message_id: str,
+        request: Request,
+        run_id: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        runtime = _runtime(request)
+        run = await _selected_run(runtime, run_id)
+        proof = await runtime.proof.prove_effectively_once(run.run_id, message_id)
+        return {"proof": proof.model_dump(mode="json")}
+
     @app.get("/api/policies")
     async def policies(request: Request) -> dict[str, Any]:
         runtime = _runtime(request)
-        policy = await runtime.store.get_active_policy(runtime.settings.tenant_id)
-        item = policy.model_dump(mode="json")
-        item["effective_replay_cap"] = str(policy.definition.effective_replay_cap)
-        return {"active_policy": item, "items": [item]}
+        active = await runtime.store.get_active_policy(runtime.settings.tenant_id)
+        items = []
+        for policy in await runtime.policies.list(runtime.settings.tenant_id):
+            item = policy.model_dump(mode="json")
+            item["effective_replay_cap"] = str(policy.definition.effective_replay_cap)
+            items.append(item)
+        return {
+            "active_policy": next(
+                item
+                for item in items
+                if item["definition"]["version"] == active.version
+            ),
+            "items": items,
+            "approval_events": [
+                event.model_dump(mode="json")
+                for event in await runtime.store.list_policy_approval_events(
+                    runtime.settings.tenant_id
+                )
+            ],
+            "activation_events": [
+                event.model_dump(mode="json")
+                for event in await runtime.store.list_policy_activation_events(
+                    runtime.settings.tenant_id
+                )
+            ],
+        }
+
+    @app.post("/api/policies/extract")
+    async def extract_policy(
+        request: Request, file: UploadFile = File(...)
+    ) -> dict[str, Any]:
+        runtime = _runtime(request)
+        require_admin(request, runtime.settings)
+        if file.content_type != "application/pdf":
+            raise PolicyValidationError("policy upload must use application/pdf")
+        pdf_bytes = await file.read(5_000_001)
+        policy = await runtime.policies.extract_pdf(pdf_bytes)
+        return {
+            "policy": policy.model_dump(mode="json"),
+            "effective_replay_cap": str(policy.definition.effective_replay_cap),
+            "authority": "pending approval; cannot authorize an action",
+        }
+
+    @app.post("/api/policies/{version}/approve")
+    async def approve_policy(
+        version: str, body: PolicyMutationRequest, request: Request
+    ) -> dict[str, Any]:
+        runtime = _runtime(request)
+        require_admin(request, runtime.settings)
+        policy = await runtime.policies.approve(
+            runtime.settings.tenant_id, version, body.actor
+        )
+        return {"policy": policy.model_dump(mode="json")}
+
+    @app.post("/api/policies/{version}/activate")
+    async def activate_policy(
+        version: str, body: PolicyMutationRequest, request: Request
+    ) -> dict[str, Any]:
+        runtime = _runtime(request)
+        require_admin(request, runtime.settings)
+        policy = await runtime.policies.activate(
+            runtime.settings.tenant_id, version, body.actor
+        )
+        runtime.orchestrator.invalidate_policy_cache()
+        return {"policy": policy.model_dump(mode="json")}
 
     @app.post("/api/demo/reset", response_model=DemoActionResponse)
     async def reset_demo(request: Request) -> DemoActionResponse:
@@ -247,96 +499,31 @@ def register_routes(app: FastAPI) -> None:
     async def start_demo(request: Request) -> DemoActionResponse:
         runtime = _runtime(request)
         require_admin(request, runtime.settings)
-        trace_id = _trace_id(request)
-        run = await runtime.demo.get_active()
-        await runtime.store.mark_run_running(run.run_id)
-        current = await runtime.store.list_messages(run.run_id)
-
-        for message in current:
-            if message.current_state != MessageState.RECEIVED:
-                continue
-            operation_id = f"op_{uuid.uuid4().hex}"
-            await _record_publish_receipt(
-                runtime,
-                message=message,
-                operation_id=operation_id,
-                status=ReceiptStatus.STARTED,
-                kind=ReceiptKind.PUBSUB_PUBLISH_ATTEMPT,
-                trace_id=trace_id,
-            )
-            body = {
-                "run_id": run.run_id,
-                "message_id": message.message_id,
-                "source_topic": message.source_topic,
-                "payload": message.original_payload,
-            }
-            try:
-                transport_id = await runtime.publisher.publish(
-                    topic=runtime.settings.pubsub_topic,
-                    payload=body,
-                    attributes={
-                        "run_id": run.run_id,
-                        "source_message_id": message.message_id,
-                        "synthetic": "true",
-                    },
-                )
-            except Exception as exc:
-                await _record_publish_receipt(
-                    runtime,
-                    message=message,
-                    operation_id=operation_id,
-                    status=ReceiptStatus.FAILED,
-                    kind=ReceiptKind.PUBSUB_PUBLISH_RESULT,
-                    trace_id=trace_id,
-                    error_code="PUBSUB_PUBLISH_FAILED",
-                )
-                raise DependencyUnavailable(
-                    "PUBSUB_PUBLISH_FAILED",
-                    "A synthetic message could not be published.",
-                    trace_id,
-                ) from exc
-            await _record_publish_receipt(
-                runtime,
-                message=message,
-                operation_id=operation_id,
-                status=ReceiptStatus.CONFIRMED,
-                kind=ReceiptKind.PUBSUB_PUBLISH_RESULT,
-                trace_id=trace_id,
-                transport_message_id=transport_id,
-            )
-
-            if runtime.settings.use_in_memory_store:
-                registration = await runtime.delivery.register(
-                    run_id=run.run_id,
-                    subscription="local-inline-bypass",
-                    source_message_id=message.message_id,
-                    transport_message_id=transport_id,
-                    source_topic=message.source_topic,
-                    payload=message.original_payload,
-                    trace_id=trace_id,
-                )
-                await runtime.delivery.process_inbox(
-                    run_id=run.run_id,
-                    inbox_id=registration.inbox.inbox_id,
-                    worker_id=f"local_{uuid.uuid4().hex}",
-                    trace_id=trace_id,
-                )
-
-        final_run = await runtime.store.get_run(run.run_id)
-        return DemoActionResponse(
-            run_id=run.run_id,
-            status=final_run.status.value,
-            message_count=len(current),
-            details={
-                "transport": (
-                    "local inline, non-durable"
-                    if runtime.settings.use_in_memory_store
-                    else "Google Cloud Pub/Sub"
-                ),
-                "synthetic_data": True,
-                "simulated_downstream": True,
-            },
+        return await _start_active_demo(
+            runtime, trace_id=_trace_id(request), inject_failure=False
         )
+
+    @app.post("/api/demo/start-with-failure", response_model=DemoActionResponse)
+    async def start_demo_with_failure(request: Request) -> DemoActionResponse:
+        runtime = _runtime(request)
+        require_admin(request, runtime.settings)
+        return await _start_active_demo(
+            runtime, trace_id=_trace_id(request), inject_failure=True
+        )
+
+    @app.post("/api/recheck/run")
+    async def run_recheck(request: Request, body: RecoveryRequest) -> dict[str, Any]:
+        """Manual test nudge; production recovery remains Scheduler -> task intents."""
+
+        runtime = _runtime(request)
+        require_admin(request, runtime.settings)
+        result = await runtime.delivery.schedule_recovery(
+            limit=body.limit, trace_id=_trace_id(request)
+        )
+        return {
+            **result.model_dump(mode="json"),
+            "execution": "task intents scheduled; no sweep-side business effect",
+        }
 
     @app.post("/pubsub/dlq", status_code=204)
     async def pubsub_dlq(request: Request, envelope: PubSubEnvelope) -> Response:

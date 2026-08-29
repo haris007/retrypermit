@@ -19,7 +19,15 @@ import {
   type JsonRecord,
 } from "./api";
 
-type ActionName = "reset" | "seed" | "start";
+type ActionName =
+  | "reset"
+  | "seed"
+  | "start"
+  | "startWithFailure"
+  | "extractPolicy"
+  | "approvePolicy"
+  | "activatePolicy"
+  | "prove";
 
 interface MessageSummary {
   id: string;
@@ -27,6 +35,7 @@ interface MessageSummary {
   orderId: string;
   amount: number;
   currency: string;
+  failureClass: string;
   raw: JsonRecord;
 }
 
@@ -43,6 +52,8 @@ interface Receipt {
   id: string;
   type: string;
   outcome: string;
+  phase: "planned" | "attempted" | "confirmed" | "failed";
+  errorCode: string;
   at: string;
   detail: unknown;
 }
@@ -52,6 +63,10 @@ interface PolicySummary {
   status: string;
   source: string;
   cap: number | null;
+  sourceHash: string;
+  extractedAt: string;
+  clauses: unknown[];
+  raw: JsonRecord;
 }
 
 interface DiffItem {
@@ -65,6 +80,8 @@ const STATE_ORDER = [
   "TRIAGING",
   "TRIAGED",
   "PLANNED",
+  "DEFERRED",
+  "RECHECKING",
   "REPAIRING",
   "REPLAYING",
   "REPLAYED",
@@ -81,6 +98,7 @@ const STATUS_LABELS: Record<string, string> = {
   CONFIRMED: "Confirmed",
   ESCALATED: "Escalated",
   DEFERRED: "Deferred",
+  RECHECKING: "Rechecking",
   QUARANTINED: "Quarantined",
   FAILED_RETRYABLE: "Retryable failure",
   FAILED_FINAL: "Failed",
@@ -96,15 +114,25 @@ function stateLabel(state: string): string {
 
 function stateTone(state: string): string {
   if (state === "REPLAYED" || state === "CONFIRMED") return "success";
-  if (state.includes("FAIL") || state === "ESCALATED" || state === "QUARANTINED") {
-    return "danger";
-  }
-  if (state === "DEFERRED") return "muted";
-  if (state === "REPAIRING" || state === "REPLAYING") return "warning";
+  if (state === "QUARANTINED") return "security";
+  if (state.includes("FAIL") || state === "ESCALATED") return "danger";
+  if (state === "DEFERRED" || state === "RECHECKING") return "warning";
   if (state === "TRIAGING" || state === "TRIAGED" || state === "PLANNED") {
     return "active";
   }
   return "neutral";
+}
+
+function receiptPhase(type: string, outcome: string): Receipt["phase"] {
+  const normalizedOutcome = normalizeState(outcome);
+  if (normalizedOutcome === "FAILED" || normalizedOutcome === "REJECTED") return "failed";
+  if (type === "task_schedule_attempt") return "planned";
+  if (normalizedOutcome === "STARTED" || normalizedOutcome === "IN_PROGRESS") return "attempted";
+  return "confirmed";
+}
+
+function receiptIcon(phase: Receipt["phase"]): string {
+  return { planned: "P", attempted: "A", confirmed: "✓", failed: "!" }[phase];
 }
 
 function unwrapRecord(value: unknown, keys: string[]): JsonRecord {
@@ -137,6 +165,7 @@ function normalizeMessage(value: unknown, index: number): MessageSummary {
       first(raw, ["currency"], first(payload, ["currency"])),
       "USD",
     ),
+    failureClass: stringValue(first(raw, ["failure_class", "failureClass"]), "pending"),
     raw,
   };
 }
@@ -185,13 +214,17 @@ function normalizeReceipt(value: unknown, index: number): Receipt {
     Object.entries(raw).filter(([key]) => !knownKeys.has(key)),
   );
 
+  const type = stringValue(
+    first(raw, ["receipt_type", "receiptType", "type", "tool_name", "toolName", "kind"]),
+    "operation",
+  );
+  const outcome = stringValue(first(raw, ["outcome", "status", "result"]), "recorded");
   return {
     id: stringValue(first(raw, ["receipt_id", "receiptId", "id"]), `receipt-${index}`),
-    type: stringValue(
-      first(raw, ["receipt_type", "receiptType", "type", "tool_name", "toolName", "kind"]),
-      "operation",
-    ),
-    outcome: stringValue(first(raw, ["outcome", "status", "result"]), "recorded"),
+    type,
+    outcome,
+    phase: receiptPhase(type, outcome),
+    errorCode: stringValue(first(raw, ["error_code", "errorCode"]), ""),
     at: stringValue(first(raw, ["created_at", "createdAt", "timestamp", "at"]), ""),
     detail: first(raw, ["details", "detail", "payload", "data"], fallbackDetail),
   };
@@ -219,6 +252,10 @@ function normalizePolicy(value: unknown): PolicySummary {
       "Seeded JSON",
     ),
     cap: capValue === undefined || capValue === null ? null : numberValue(capValue),
+    sourceHash: stringValue(first(raw, ["source_hash", "sourceHash"]), "Pending"),
+    extractedAt: stringValue(first(raw, ["extracted_at", "extractedAt"]), ""),
+    clauses: list(first(definition, ["clauses"]), ["items"]),
+    raw,
   };
 }
 
@@ -355,6 +392,8 @@ export default function App() {
   const [transitionPayload, setTransitionPayload] = useState<unknown[]>([]);
   const [receiptPayload, setReceiptPayload] = useState<unknown[]>([]);
   const [policyPayload, setPolicyPayload] = useState<unknown[]>([]);
+  const [proofPayload, setProofPayload] = useState<unknown>({});
+  const [selectedPolicyVersion, setSelectedPolicyVersion] = useState("");
   const [selectedId, setSelectedId] = useState("");
   const [adminToken, setAdminToken] = useState("");
   const [showToken, setShowToken] = useState(false);
@@ -410,10 +449,25 @@ export default function App() {
     first(stats, ["active_policy_version", "activePolicyVersion"], activePolicy?.version),
     "Not loaded",
   );
+  const selectedPolicy =
+    policies.find((policy) => policy.version === selectedPolicyVersion) ?? activePolicy;
+  const proof = unwrapRecord(proofPayload, ["proof", "data"]);
   const total = numberValue(first(stats, ["total", "total_messages", "totalMessages"]), messages.length);
   const resolved = numberValue(
     first(stats, ["resolved", "resolved_count", "resolvedCount", "replayed"]),
     messages.filter((message) => message.state === "REPLAYED" || message.state === "CONFIRMED").length,
+  );
+  const deferredTotal = numberValue(
+    first(stats, ["deferred_total", "deferredTotal"]),
+    messages.filter((message) => message.failureClass === "transient_downstream").length,
+  );
+  const quarantinedTotal = numberValue(
+    first(stats, ["quarantined_count", "quarantinedCount"]),
+    messages.filter((message) => message.state === "QUARANTINED").length,
+  );
+  const escalatedTotal = numberValue(
+    first(stats, ["escalated_count", "escalatedCount"]),
+    messages.filter((message) => message.state === "ESCALATED").length,
   );
   const dlqDepth = numberValue(
     first(stats, ["dlq_depth", "dlqDepth", "pending", "pending_count", "pendingCount"]),
@@ -460,12 +514,22 @@ export default function App() {
       const policyItems = list(policiesResult, ["policies", "items", "versions"]);
       const explicitActivePolicy = policyEnvelope.active_policy ?? policyEnvelope.activePolicy;
       const nextPolicies =
-        explicitActivePolicy && typeof explicitActivePolicy === "object"
-          ? [explicitActivePolicy, ...policyItems]
-          : policyItems;
+        policyItems.length > 0
+          ? policyItems
+          : explicitActivePolicy && typeof explicitActivePolicy === "object"
+            ? [explicitActivePolicy]
+            : [];
       setStatsPayload(statsResult);
       setMessagePayload(nextMessages);
       setPolicyPayload(nextPolicies);
+      if (!selectedPolicyVersion && nextPolicies.length) {
+        const normalizedPolicies = nextPolicies.map(normalizePolicy);
+        setSelectedPolicyVersion(
+          normalizedPolicies.find((policy) => policy.status === "ACTIVE")?.version ??
+            normalizedPolicies[0]?.version ??
+            "",
+        );
+      }
 
       const normalized = nextMessages.map(normalizeMessage);
       const nextSelected =
@@ -489,7 +553,7 @@ export default function App() {
     } finally {
       pollInFlight.current = false;
     }
-  }, [refreshSelected, selectedId]);
+  }, [refreshSelected, selectedId, selectedPolicyVersion]);
 
   useEffect(() => {
     void refresh();
@@ -518,12 +582,19 @@ export default function App() {
     setBusyAction(action);
     setError(null);
     try {
-      await api[action](adminToken);
+      if (action === "reset" || action === "seed" || action === "start") {
+        await api[action](adminToken);
+      } else if (action === "startWithFailure") {
+        await api.startWithFailure(adminToken);
+      } else {
+        throw new ApiError("This action needs a selected item.", { status: 400 });
+      }
       if (action === "reset") {
         setSelectedId("");
         setDetailPayload({});
         setTransitionPayload([]);
         setReceiptPayload([]);
+        setProofPayload({});
       }
       await refresh();
     } catch (cause) {
@@ -531,6 +602,66 @@ export default function App() {
         cause instanceof ApiError
           ? cause
           : new ApiError("The control action failed.", { status: 0 }),
+      );
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function proveSelected() {
+    if (!selectedId) return;
+    setBusyAction("prove");
+    setError(null);
+    try {
+      setProofPayload(await api.proof(selectedId));
+    } catch (cause) {
+      setError(
+        cause instanceof ApiError
+          ? cause
+          : new ApiError("The live proof query failed.", { status: 0 }),
+      );
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function uploadPolicy(file: File) {
+    setBusyAction("extractPolicy");
+    setError(null);
+    try {
+      const result = await api.extractPolicy(file, adminToken);
+      const extracted = unwrapRecord(result, ["policy"]);
+      setSelectedPolicyVersion(
+        stringValue(first(unwrapRecord(extracted, ["definition"]), ["version"]), ""),
+      );
+      await refresh();
+    } catch (cause) {
+      setError(
+        cause instanceof ApiError
+          ? cause
+          : new ApiError("Policy extraction failed.", { status: 0 }),
+      );
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function mutatePolicy(action: "approvePolicy" | "activatePolicy") {
+    if (!selectedPolicy?.version) return;
+    setBusyAction(action);
+    setError(null);
+    try {
+      if (action === "approvePolicy") {
+        await api.approvePolicy(selectedPolicy.version, adminToken);
+      } else {
+        await api.activatePolicy(selectedPolicy.version, adminToken);
+      }
+      await refresh();
+    } catch (cause) {
+      setError(
+        cause instanceof ApiError
+          ? cause
+          : new ApiError("Policy lifecycle action failed.", { status: 0 }),
       );
     } finally {
       setBusyAction(null);
@@ -550,6 +681,22 @@ export default function App() {
   const page = stringValue(first(detail, ["runbook_page", "runbookPage", "page"]), "—");
   const idempotencyKey = stringValue(first(detail, ["idempotency_key", "idempotencyKey"]), "Not reserved");
   const downstreamReference = stringValue(first(detail, ["downstream_reference", "downstreamReference", "downstream_ref"]), "Awaiting confirmation");
+  const proposedFix = stringValue(first(detail, ["proposed_fix", "proposedFix"]), "No proposed fix recorded.");
+  const withheldReason = stringValue(first(detail, ["withheld_reason", "withheldReason"]), "Replay is withheld.");
+  const severity = stringValue(first(detail, ["severity"]), "—");
+  const sla = stringValue(first(detail, ["sla"]), "—");
+  const escalationRecipient = stringValue(first(detail, ["escalation_recipient", "escalationRecipient"]), "—");
+  const quarantineReason = stringValue(first(detail, ["quarantine_reason", "quarantineReason"]), "Payload instruction refused.");
+  const deferralReason = stringValue(first(detail, ["deferral_reason", "deferralReason"]), "Awaiting dependency recovery.");
+  const recheckAt = stringValue(first(detail, ["recheck_at", "recheckAt"]), "—");
+  const recheckAttempts = numberValue(first(detail, ["recheck_attempts", "recheckAttempts"]));
+  const demoRecheckSeconds = numberValue(first(stats, ["demo_recheck_seconds", "demoRecheckSeconds"]), 10);
+  const attemptCount = numberValue(first(detail, ["attempts", "attempt_count", "attemptCount"]));
+  const injectionDetected = first(detail, ["contains_injection_attempt", "containsInjectionAttempt"]) === true;
+  const errorCodes = [...new Set([
+    stringValue(first(detail, ["last_error_code", "lastErrorCode"]), ""),
+    ...receipts.map((receipt) => receipt.errorCode),
+  ].filter(Boolean))];
 
   return (
     <div className="app-shell min-h-screen antialiased">
@@ -596,6 +743,7 @@ export default function App() {
           <div className="disclosure-stack" aria-label="Demo disclosures">
             <span>Synthetic data</span>
             <span>Simulated downstream</span>
+            <span>Demo mode</span>
           </div>
         </section>
 
@@ -620,9 +768,24 @@ export default function App() {
             <small>{total ? `${total} messages in this run` : "Waiting for seed"}</small>
           </article>
           <article className="metric">
-            <span>Resolved</span>
-            <strong>{resolved}<i>/{total || 6}</i></strong>
+            <span>Auto-resolved</span>
+            <strong>{resolved}<i>/{total || 12}</i></strong>
             <small>Confirmed business effects</small>
+          </article>
+          <article className="metric metric-deferred">
+            <span>Deferred</span>
+            <strong>{deferredTotal}</strong>
+            <small>Scheduled dependency rechecks</small>
+          </article>
+          <article className="metric metric-security">
+            <span>Quarantined</span>
+            <strong>{quarantinedTotal}</strong>
+            <small>Security refusals</small>
+          </article>
+          <article className="metric metric-escalated">
+            <span>Escalated</span>
+            <strong>{escalatedTotal}</strong>
+            <small>Human confirmation required</small>
           </article>
           <article className="metric">
             <span>Elapsed</span>
@@ -675,13 +838,89 @@ export default function App() {
                 disabled={busyAction !== null}
                 onClick={() => void runAction("seed")}
               >
-                {busyAction === "seed" ? "Seeding…" : "Seed six"}
+                {busyAction === "seed" ? "Seeding…" : "Seed 12"}
               </button>
               <button className="button button-primary" type="submit" disabled={busyAction !== null}>
                 {busyAction === "start" ? "Starting…" : "Start run"}
                 <span aria-hidden="true">→</span>
               </button>
+              <button
+                className="button button-danger"
+                type="button"
+                disabled={busyAction !== null}
+                onClick={() => void runAction("startWithFailure")}
+              >
+                {busyAction === "startWithFailure"
+                  ? "Injecting failure…"
+                  : "Start with lost response"}
+              </button>
             </div>
+            <p className="failure-disclosure">
+              The injected path commits one simulated downstream effect and then
+              returns a deliberate 503. RetryPermit retries the same idempotency key
+              and must receive the original reference.
+            </p>
+            <div className="policy-controls">
+              <label>
+                <span>Runbook version</span>
+                <select
+                  value={selectedPolicy?.version ?? ""}
+                  onChange={(event) => setSelectedPolicyVersion(event.target.value)}
+                >
+                  {policies.map((policy) => (
+                    <option key={policy.version} value={policy.version}>
+                      {policy.version} · {policy.status} · cap ${policy.cap ?? "—"}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="button button-quiet file-button">
+                {busyAction === "extractPolicy" ? "Extracting PDF…" : "Rebuild from PDF"}
+                <input
+                  type="file"
+                  accept="application/pdf,.pdf"
+                  disabled={busyAction !== null}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) void uploadPolicy(file);
+                    event.target.value = "";
+                  }}
+                />
+              </label>
+              <button
+                className="button button-secondary"
+                type="button"
+                disabled={busyAction !== null || selectedPolicy?.status !== "PENDING_APPROVAL"}
+                onClick={() => void mutatePolicy("approvePolicy")}
+              >
+                {busyAction === "approvePolicy" ? "Approving…" : "Approve seeded policy"}
+              </button>
+              <button
+                className="button button-primary"
+                type="button"
+                disabled={
+                  busyAction !== null ||
+                  !selectedPolicy ||
+                  !["APPROVED", "ACTIVE"].includes(selectedPolicy.status)
+                }
+                onClick={() => void mutatePolicy("activatePolicy")}
+              >
+                {busyAction === "activatePolicy" ? "Activating…" : "Activate selected"}
+              </button>
+            </div>
+            {selectedPolicy ? (
+              <div className="policy-evidence">
+                <span>
+                  <strong>{selectedPolicy.status}</strong> · effective cap ${selectedPolicy.cap ?? "—"}
+                </span>
+                <code title={selectedPolicy.sourceHash}>
+                  Source hash {selectedPolicy.sourceHash.slice(0, 16)}…
+                </code>
+                <small>
+                  Extracted {formatMoment(selectedPolicy.extractedAt)} · {selectedPolicy.clauses.length} validated clauses
+                </small>
+              </div>
+            ) : null}
           </form>
         </Panel>
 
@@ -702,7 +941,7 @@ export default function App() {
                       type="button"
                       role="listitem"
                       key={message.id}
-                      className={`message-chip ${message.id === selectedId ? "is-selected" : ""}`}
+                      className={`message-chip chip-${stateTone(message.state)} ${message.id === selectedId ? "is-selected" : ""}`}
                       onClick={() => setSelectedId(message.id)}
                       aria-pressed={message.id === selectedId}
                     >
@@ -713,7 +952,15 @@ export default function App() {
                           <StatusPill state={message.state} />
                         </span>
                         <span className="message-amount">
-                          {formatAmount(message.amount, message.currency)} · Schema v4 repair
+                          {formatAmount(message.amount, message.currency)} · {message.failureClass === "schema_drift"
+                            ? "Schema v3 drift"
+                            : message.failureClass === "transient_downstream"
+                              ? "Inventory 503"
+                              : message.failureClass === "invalid_data"
+                                ? "Invalid business data"
+                                : message.failureClass === "prompt_injection"
+                                  ? "Untrusted instruction"
+                                  : "Awaiting triage"}
                         </span>
                         <span className="progress-track" aria-hidden="true">
                           <i style={{ width: `${progress}%` }} />
@@ -724,7 +971,7 @@ export default function App() {
                 })}
               </div>
             ) : (
-              <EmptyState>Seed the six synthetic schema-drift messages to begin.</EmptyState>
+              <EmptyState>Seed the 12 synthetic messages across Classes A–D to begin.</EmptyState>
             )}
           </Panel>
 
@@ -761,14 +1008,57 @@ export default function App() {
                       <small>Page {page} · active policy {activePolicyVersion}</small>
                     </div>
                   </div>
+                  {injectionDetected ? (
+                    <div className="injection-warning" role="alert">
+                      <strong>Injection warning</strong>
+                      <span>Untrusted payload instructions were refused and rendered as inert text.</span>
+                    </div>
+                  ) : null}
+                  <div className="execution-facts" aria-label="Execution facts">
+                    <div><span>Attempts</span><strong>{attemptCount + recheckAttempts}</strong></div>
+                    <div><span>Error codes</span><code>{errorCodes.join(", ") || "none"}</code></div>
+                    <div><span>Idempotency</span><code>{idempotencyKey === "Not reserved" ? idempotencyKey : `${idempotencyKey.slice(0, 18)}…`}</code></div>
+                    <div><span>Downstream</span><code>{downstreamReference}</code></div>
+                  </div>
                 </>
               ) : (
                 <EmptyState>Choose a message to inspect its policy-governed decision.</EmptyState>
               )}
             </Panel>
 
+            {selectedId && classification === "transient_downstream" ? (
+              <div className="outcome-callout outcome-deferred" role="status">
+                <strong>{currentState === "REPLAYED" ? "RECOVERED & REPLAYED" : "DEFERRED"}</strong>
+                <p>{deferralReason}</p>
+                <small>
+                  {recheckAttempts} recheck{recheckAttempts === 1 ? "" : "s"} · last scheduled {formatMoment(recheckAt)} · demo override {demoRecheckSeconds}s
+                </small>
+              </div>
+            ) : null}
+
+            {selectedId && classification === "invalid_data" ? (
+              <div className="outcome-callout outcome-withheld" role="status">
+                <strong>WITHHELD — NO REPLAY</strong>
+                <p>{withheldReason}</p>
+                <dl>
+                  <div><dt>Proposed fix</dt><dd>{proposedFix}</dd></div>
+                  <div><dt>Severity</dt><dd>{severity}</dd></div>
+                  <div><dt>SLA</dt><dd>{sla}</dd></div>
+                  <div><dt>Recipient</dt><dd>{escalationRecipient}</dd></div>
+                </dl>
+              </div>
+            ) : null}
+
+            {selectedId && classification === "prompt_injection" ? (
+              <div className="outcome-callout outcome-quarantine" role="status">
+                <strong>QUARANTINED — INSTRUCTION REFUSED</strong>
+                <p>{quarantineReason}</p>
+                <small>Rendered as inert text; no downstream effect is permitted.</small>
+              </div>
+            ) : null}
+
             {selectedId ? (
-              <Panel title="Payload repair" kicker="Deterministic allowlist" className="payload-panel">
+              <Panel title="Payload evidence" kicker="Untrusted input stays inert" className="payload-panel">
                 <div className="payload-grid">
                   <article className="payload-block">
                     <header>
@@ -779,8 +1069,8 @@ export default function App() {
                   </article>
                   <article className="payload-block payload-repaired">
                     <header>
-                      <span>Repaired payload</span>
-                      <small>Policy validated</small>
+                      <span>{hasRepairedPayload ? "Replay payload" : "Replay payload withheld"}</span>
+                      <small>{hasRepairedPayload ? "Policy validated" : "No executable payload"}</small>
                     </header>
                     <pre tabIndex={0}>{displayJson(repairedPayload)}</pre>
                   </article>
@@ -822,11 +1112,9 @@ export default function App() {
                 ) : null}
               </Panel>
             ) : null}
-          </div>
-        </section>
 
-        {selectedId ? (
-          <section className="evidence-grid">
+            {selectedId ? (
+              <section className="evidence-grid">
             <Panel title="Transition timeline" kicker="Persisted state history">
               {transitions.length ? (
                 <ol className="timeline">
@@ -857,14 +1145,14 @@ export default function App() {
               {receipts.length ? (
                 <div className="receipt-list">
                   {receipts.map((receipt) => (
-                    <article className="receipt-card" key={receipt.id}>
+                    <article className={`receipt-card receipt-${receipt.phase}`} key={receipt.id}>
                       <div className="receipt-head">
-                        <span className="receipt-icon" aria-hidden="true">✓</span>
+                        <span className="receipt-icon" aria-hidden="true">{receiptIcon(receipt.phase)}</span>
                         <div>
                           <strong>{receipt.type.replaceAll("_", " ")}</strong>
                           <small>{receipt.id}</small>
                         </div>
-                        <span className="receipt-outcome">{receipt.outcome}</span>
+                        <span className="receipt-outcome">{receipt.phase}</span>
                       </div>
                       <pre tabIndex={0}>{displayJson(receipt.detail)}</pre>
                       <time dateTime={receipt.at}>{formatMoment(receipt.at)}</time>
@@ -876,7 +1164,48 @@ export default function App() {
               )}
             </Panel>
 
-            <Panel title="Effect proof" kicker="Effectively-once boundary" className="proof-panel">
+            <Panel
+              title="Prove it"
+              kicker="Live effectively-once query"
+              className="proof-panel"
+              action={
+                <button
+                  type="button"
+                  className="button button-primary"
+                  disabled={busyAction !== null}
+                  onClick={() => void proveSelected()}
+                >
+                  {busyAction === "prove" ? "Querying…" : "Prove effectively once"}
+                </button>
+              }
+            >
+              {Object.keys(proof).length ? (
+                <div className="proof-equation" role="status">
+                  <strong>
+                    {numberValue(proof.execution_attempt_count)} execution attempts
+                  </strong>
+                  <span aria-hidden="true">→</span>
+                  <strong>
+                    {numberValue(proof.unique_downstream_effect_count)} unique downstream effect
+                  </strong>
+                </div>
+              ) : null}
+              <div className="proof-item">
+                <span>Deliveries recorded by RetryPermit</span>
+                <code>
+                  {Object.keys(proof).length
+                    ? numberValue(proof.recorded_pubsub_delivery_count)
+                    : "Run proof"}
+                </code>
+              </div>
+              <div className="proof-item">
+                <span>Downstream requests</span>
+                <code>
+                  {Object.keys(proof).length
+                    ? numberValue(proof.downstream_request_count)
+                    : "Run proof"}
+                </code>
+              </div>
               <div className="proof-item">
                 <span>Idempotency prefix</span>
                 <code title={idempotencyKey}>
@@ -886,7 +1215,9 @@ export default function App() {
               <div className="proof-connector" aria-hidden="true"><i /></div>
               <div className="proof-item">
                 <span>Downstream reference</span>
-                <code title={downstreamReference}>{downstreamReference}</code>
+                <code title={downstreamReference}>
+                  {stringValue(proof.final_downstream_reference, downstreamReference)}
+                </code>
               </div>
               <div className="proof-verdict">
                 <span className="proof-shield" aria-hidden="true">✓</span>
@@ -896,8 +1227,10 @@ export default function App() {
                 </p>
               </div>
             </Panel>
-          </section>
-        ) : null}
+              </section>
+            ) : null}
+          </div>
+        </section>
       </main>
 
       <footer>

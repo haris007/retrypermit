@@ -38,6 +38,7 @@ class MessageRecord(BaseModel):
     runbook_page: int | None = None
     active_policy_version: str
     decision_summary: str | None = None
+    proposed_fix: str | None = None
     evidence: list[str] = Field(default_factory=list)
     contains_injection_attempt: bool = False
     recommended_action: RecommendedAction | None = None
@@ -47,6 +48,15 @@ class MessageRecord(BaseModel):
     idempotency_key: str | None = None
     downstream_reference: str | None = None
     next_attempt_at: datetime | None = None
+    deferral_reason: str | None = None
+    recheck_at: datetime | None = None
+    recheck_attempts: int = Field(default=0, ge=0)
+    transient_recovered: bool = False
+    withheld_reason: str | None = None
+    severity: str | None = None
+    sla: str | None = None
+    escalation_recipient: str | None = None
+    quarantine_reason: str | None = None
     next_transition_sequence: int = Field(default=1, ge=1)
     created_at: datetime
     updated_at: datetime
@@ -72,3 +82,4 @@ class MessageAnalysisUpdate(BaseModel):
     contains_injection_attempt: bool
     recommended_action: RecommendedAction
     proposed_repairs: list[Repair]
+    proposed_fix: str | None = None

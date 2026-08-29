@@ -3,8 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import timedelta
 
+from retrypermit.adapters.downstream.store_backed import StoreBackedDownstream
 from retrypermit.adapters.models.adk_gemini import AdkGeminiProvider
 from retrypermit.adapters.models.fake import DeterministicFakeModelProvider
+from retrypermit.adapters.policies.adk_pdf_extractor import AdkGeminiPdfPolicyExtractor
+from retrypermit.adapters.policies.fake_extractor import DeterministicPolicyExtractor
 from retrypermit.adapters.policies.seeded_json import SeededPolicyProvider
 from retrypermit.adapters.pubsub.google_publisher import (
     GooglePubSubPublisher,
@@ -19,6 +22,8 @@ from retrypermit.adapters.tasks.cloud_tasks import (
 from retrypermit.application.delivery_service import DeliveryService
 from retrypermit.application.demo_service import DemoService
 from retrypermit.application.orchestrator import RetryPermitOrchestrator
+from retrypermit.application.policy_service import PolicyService
+from retrypermit.application.proof_service import ProofService
 from retrypermit.config import Settings
 from retrypermit.domain.errors import NotFoundError
 from retrypermit.ports.publisher import Publisher
@@ -33,6 +38,8 @@ class Runtime:
     demo: DemoService
     orchestrator: RetryPermitOrchestrator
     delivery: DeliveryService
+    proof: ProofService
+    policies: PolicyService
     publisher: Publisher
     scheduler: TaskScheduler
 
@@ -49,13 +56,28 @@ async def build_runtime(settings: Settings) -> Runtime:
 
     if settings.use_fake_model:
         model_provider = DeterministicFakeModelProvider()
+        policy_extractor = DeterministicPolicyExtractor()
     else:
         model_provider = AdkGeminiProvider(settings.gemini_model)
+        policy_extractor = AdkGeminiPdfPolicyExtractor(settings.gemini_model)
     orchestrator = RetryPermitOrchestrator(
         store,
         model_provider,
+        StoreBackedDownstream(store),
         lease_duration=timedelta(seconds=settings.replay_lease_seconds),
+        retry_base_delay=timedelta(seconds=settings.replay_retry_base_seconds),
+        retry_max_delay=timedelta(seconds=settings.replay_retry_max_seconds),
         model_timeout_seconds=settings.model_timeout_seconds,
+        downstream_timeout_seconds=settings.downstream_timeout_seconds,
+        demo_recheck_delay=(
+            timedelta(seconds=settings.demo_recheck_seconds)
+            if settings.demo_mode
+            else None
+        ),
+        simulated_transient_recovery_delay=timedelta(
+            seconds=settings.simulated_transient_recovery_seconds
+        ),
+        triage_concurrency=settings.triage_concurrency,
     )
 
     if settings.use_in_memory_store:
@@ -77,6 +99,13 @@ async def build_runtime(settings: Settings) -> Runtime:
         demo=demo,
         orchestrator=orchestrator,
         delivery=delivery,
+        proof=ProofService(store),
+        policies=PolicyService(
+            store,
+            policy_provider,
+            policy_extractor,
+            extraction_timeout_seconds=settings.policy_extraction_timeout_seconds,
+        ),
         publisher=publisher,
         scheduler=scheduler,
     )

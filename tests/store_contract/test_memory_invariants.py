@@ -118,8 +118,8 @@ def test_run_reset_isolates_and_preserves_history() -> None:
         assert not historical.active
         assert historical.status == RunStatus.INACTIVE
         assert second.active
-        assert len(await store.list_messages(first.run_id)) == 6
-        assert len(await store.list_messages(second.run_id)) == 6
+        assert len(await store.list_messages(first.run_id)) == 12
+        assert len(await store.list_messages(second.run_id)) == 12
 
     asyncio.run(scenario())
 

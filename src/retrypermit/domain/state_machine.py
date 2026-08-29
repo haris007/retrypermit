@@ -11,7 +11,15 @@ _ALLOWED: dict[MessageState, set[MessageState]] = {
         MessageState.ESCALATED,
     },
     MessageState.TRIAGED: {MessageState.PLANNED},
-    MessageState.PLANNED: {MessageState.REPAIRING, MessageState.ESCALATED},
+    MessageState.PLANNED: {
+        MessageState.DEFERRED,
+        MessageState.REPAIRING,
+        MessageState.REPLAYING,
+        MessageState.ESCALATED,
+        MessageState.QUARANTINED,
+    },
+    MessageState.DEFERRED: {MessageState.RECHECKING},
+    MessageState.RECHECKING: {MessageState.PLANNED, MessageState.DEFERRED},
     MessageState.REPAIRING: {MessageState.REPLAYING, MessageState.ESCALATED},
     MessageState.REPLAYING: {
         MessageState.REPLAYED,
@@ -27,6 +35,7 @@ _ALLOWED: dict[MessageState, set[MessageState]] = {
     MessageState.REPLAYED: set(),
     MessageState.FAILED_FINAL: set(),
     MessageState.ESCALATED: set(),
+    MessageState.QUARANTINED: set(),
 }
 
 
@@ -55,4 +64,5 @@ def is_terminal(state: MessageState) -> bool:
         MessageState.REPLAYED,
         MessageState.FAILED_FINAL,
         MessageState.ESCALATED,
+        MessageState.QUARANTINED,
     }

@@ -1,6 +1,7 @@
 import asyncio
 from datetime import timedelta
 
+from retrypermit.adapters.downstream.store_backed import StoreBackedDownstream
 from retrypermit.adapters.models.fake import DeterministicFakeModelProvider
 from retrypermit.adapters.policies.seeded_json import (
     SeededPolicyProvider,
@@ -18,22 +19,48 @@ from retrypermit.domain.enums import (
 )
 
 
-def test_six_class_a_messages_reach_replayed_with_confirmed_effects() -> None:
+def test_phase3_initial_pass_routes_all_four_classes_without_unsafe_effects() -> None:
     async def scenario() -> None:
         store = MemoryStore()
         demo = DemoService(store, SeededPolicyProvider())
         await demo.bootstrap()
         run = await demo.reset(run_id="six-class-a")
         provider = DeterministicFakeModelProvider()
-        messages = await RetryPermitOrchestrator(store, provider).run_all(run.run_id)
+        messages = await RetryPermitOrchestrator(
+            store, provider, StoreBackedDownstream(store)
+        ).run_all(run.run_id)
 
-        assert provider.call_count == 6
-        assert {message.current_state for message in messages} == {
-            MessageState.REPLAYED
-        }
+        assert provider.call_count == 12
+        assert (
+            sum(message.current_state == MessageState.REPLAYED for message in messages)
+            == 6
+        )
+        assert (
+            sum(message.current_state == MessageState.ESCALATED for message in messages)
+            == 2
+        )
+        assert (
+            sum(message.current_state == MessageState.DEFERRED for message in messages)
+            == 3
+        )
+        assert (
+            sum(
+                message.current_state == MessageState.QUARANTINED
+                for message in messages
+            )
+            == 1
+        )
         assert len(await store.list_downstream_effects(run.run_id)) == 6
-        assert (await store.get_run(run.run_id)).status == RunStatus.COMPLETE
+        assert (await store.get_run(run.run_id)).status == RunStatus.RUNNING
         for message in messages:
+            if message.current_state == MessageState.ESCALATED:
+                assert message.last_error_code == "BUSINESS_CONFIRMATION_REQUIRED"
+                continue
+            if message.current_state in {
+                MessageState.DEFERRED,
+                MessageState.QUARANTINED,
+            }:
+                continue
             ledger = await store.get_replay_ledger(
                 run.run_id, message.idempotency_key or ""
             )
@@ -54,7 +81,9 @@ def test_repeated_orchestration_does_not_create_another_effect() -> None:
         await demo.bootstrap()
         run = await demo.reset(run_id="repeat")
         provider = DeterministicFakeModelProvider()
-        orchestrator = RetryPermitOrchestrator(store, provider)
+        orchestrator = RetryPermitOrchestrator(
+            store, provider, StoreBackedDownstream(store)
+        )
         message_id = (await store.list_messages(run.run_id))[0].message_id
         first = await orchestrator.run_message(run.run_id, message_id)
         second = await orchestrator.run_message(run.run_id, message_id)
@@ -78,7 +107,7 @@ def test_low_confidence_proposal_escalates_without_an_effect() -> None:
         run = await demo.reset(run_id="low-confidence")
         message_id = (await store.list_messages(run.run_id))[0].message_id
         message = await RetryPermitOrchestrator(
-            store, LowConfidenceProvider()
+            store, LowConfidenceProvider(), StoreBackedDownstream(store)
         ).run_message(run.run_id, message_id)
         assert message.current_state == MessageState.ESCALATED
         assert message.last_error_code == "LOW_CONFIDENCE"
@@ -107,7 +136,9 @@ def test_triage_timeouts_stop_at_the_policy_retry_limit() -> None:
         orchestrator = RetryPermitOrchestrator(
             store,
             TimeoutProvider(),
-            retry_delay=timedelta(0),
+            StoreBackedDownstream(store),
+            retry_base_delay=timedelta(0),
+            retry_max_delay=timedelta(0),
         )
 
         for expected_attempt in range(1, policy.definition.retry_limit + 1):

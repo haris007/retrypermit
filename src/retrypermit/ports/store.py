@@ -11,6 +11,7 @@ from retrypermit.domain.messages import (
     SeedMessage,
 )
 from retrypermit.domain.policy import PolicyVersion
+from retrypermit.domain.policy_events import PolicyActivationEvent, PolicyApprovalEvent
 from retrypermit.domain.receipts import Receipt, Transition, TransitionResult
 from retrypermit.domain.replay import (
     DownstreamEffect,
@@ -25,11 +26,25 @@ from retrypermit.domain.triage import Repair
 class Store(Protocol):
     async def install_policy(self, policy: PolicyVersion) -> PolicyVersion: ...
 
+    async def approve_policy(
+        self, tenant_id: str, version: str, actor: str
+    ) -> PolicyVersion: ...
+
     async def activate_policy(
         self, tenant_id: str, version: str, actor: str
     ) -> PolicyVersion: ...
 
     async def get_active_policy(self, tenant_id: str) -> PolicyVersion: ...
+
+    async def list_policies(self, tenant_id: str) -> list[PolicyVersion]: ...
+
+    async def list_policy_approval_events(
+        self, tenant_id: str
+    ) -> list[PolicyApprovalEvent]: ...
+
+    async def list_policy_activation_events(
+        self, tenant_id: str
+    ) -> list[PolicyActivationEvent]: ...
 
     async def reset_run(
         self,
@@ -43,6 +58,8 @@ class Store(Protocol):
     async def get_active_run(self, tenant_id: str) -> DemoRun: ...
 
     async def get_run(self, run_id: str) -> DemoRun: ...
+
+    async def set_run_inject_failure(self, run_id: str, enabled: bool) -> DemoRun: ...
 
     async def mark_run_running(self, run_id: str) -> DemoRun: ...
 
@@ -76,6 +93,16 @@ class Store(Protocol):
         error_code: str | None = None,
         failed_stage: FailedStage | None = None,
         next_attempt_at: datetime | None = None,
+        deferral_reason: str | None = None,
+        recheck_at: datetime | None = None,
+        recheck_attempts: int | None = None,
+        transient_recovered: bool | None = None,
+        proposed_fix: str | None = None,
+        withheld_reason: str | None = None,
+        severity: str | None = None,
+        sla: str | None = None,
+        escalation_recipient: str | None = None,
+        quarantine_reason: str | None = None,
     ) -> TransitionResult: ...
 
     async def list_transitions(
@@ -85,6 +112,8 @@ class Store(Protocol):
     async def record_receipt(self, receipt: Receipt) -> Receipt: ...
 
     async def list_receipts(self, run_id: str, message_id: str) -> list[Receipt]: ...
+
+    async def count_recorded_deliveries(self, run_id: str, message_id: str) -> int: ...
 
     async def register_delivery(
         self,
