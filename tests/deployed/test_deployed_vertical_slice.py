@@ -134,7 +134,7 @@ def _wait_for_completion(client, headers, run_id, forbidden_version):
     pytest.fail(f"Cloud run did not complete before timeout: {stats}")
 
 
-def _verify_run(client, headers, run_id, inject_failure):
+def _verify_run(client, headers, run_id, inject_failure, *, repeat_start=True):
     messages = (
         client.get("/api/messages", params={"run_id": run_id})
         .raise_for_status()
@@ -218,21 +218,25 @@ def _verify_run(client, headers, run_id, inject_failure):
     assert proof["downstream_request_count"] == (2 if inject_failure else 1)
     assert proof["unique_downstream_effect_count"] == 1
     assert proof["ledger_status"] == "CONFIRMED"
-    # Repeating Start after COMPLETE must not republish, create effects or change mode.
-    endpoint = "/api/demo/start-with-failure" if inject_failure else "/api/demo/start"
-    before = client.get(
-        "/api/messages/synthetic-order-001/receipts", params={"run_id": run_id}
-    ).json()["items"]
-    assert (
-        client.post(endpoint, headers=headers, json={})
-        .raise_for_status()
-        .json()["status"]
-        == "COMPLETE"
-    )
-    after = client.get(
-        "/api/messages/synthetic-order-001/receipts", params={"run_id": run_id}
-    ).json()["items"]
-    assert after == before
+    # Repeating Start is checked during a fresh live run, never while validating
+    # archived evidence: the Start endpoint intentionally targets the active run.
+    if repeat_start:
+        endpoint = (
+            "/api/demo/start-with-failure" if inject_failure else "/api/demo/start"
+        )
+        before = client.get(
+            "/api/messages/synthetic-order-001/receipts", params={"run_id": run_id}
+        ).json()["items"]
+        assert (
+            client.post(endpoint, headers=headers, json={})
+            .raise_for_status()
+            .json()["status"]
+            == "COMPLETE"
+        )
+        after = client.get(
+            "/api/messages/synthetic-order-001/receipts", params={"run_id": run_id}
+        ).json()["items"]
+        assert after == before
     print(
         json.dumps(
             {
@@ -245,6 +249,69 @@ def _verify_run(client, headers, run_id, inject_failure):
     )
     assert len(keys) == 9
     return keys
+
+
+def _verify_firestore(project, runs):
+    # Reset archives the prior COMPLETE run as INACTIVE, retaining completed_at
+    # and all child evidence. Only the latest run stays active and COMPLETE.
+    db = firestore.Client(project=project)
+    for index, (run_id, version, keys) in enumerate(runs):
+        ref = db.collection("demo_runs").document(run_id)
+        record = ref.get().to_dict()
+        latest = index == len(runs) - 1
+        assert record["status"] == ("COMPLETE" if latest else "INACTIVE")
+        assert record["active"] is latest
+        assert record["completed_at"] is not None
+        assert record["active_policy_version"] == version
+        assert record["inject_failure"] is (version == "runbook-v1")
+        assert len(list(ref.collection("messages").stream())) == 12
+        effects = list(ref.collection("downstream_effects").stream())
+        assert len(effects) == 9
+        assert {effect.id for effect in effects} == keys
+        print(
+            f"Independent Firestore proof: {run_id}; 12 messages, 9 unique effects, "
+            f"completed_at={record['completed_at']}, status={record['status']}.",
+            flush=True,
+        )
+
+
+def _revalidate_existing(client, project, run_ids):
+    """Read-only continuation of a recorded live test, never a fresh-run claim."""
+    assert len(run_ids) == 2 and len(set(run_ids)) == 2
+    print(
+        "READ-ONLY evidence revalidation: no new Gemini calls, runs or policy mutations.",
+        flush=True,
+    )
+    runs = []
+    for run_id, version, injected in zip(
+        run_ids, ("runbook-v1", "runbook-v3"), (True, False), strict=True
+    ):
+        stats = (
+            client.get("/api/stats", params={"run_id": run_id})
+            .raise_for_status()
+            .json()
+        )
+        assert {key: stats[key] for key in EXPECTED} == EXPECTED
+        assert stats["active_policy_version"] == version
+        assert stats["durable_delivery"] is True
+        assert stats["demo_recheck_seconds"] is None
+        assert stats["model"] != "deterministic-fixture"
+        keys = _verify_run(client, {}, run_id, injected, repeat_start=False)
+        runs.append((run_id, version, keys))
+    policies = client.get("/api/policies").raise_for_status().json()
+    active = policies["active_policy"]
+    expected = PolicyDefinition.model_validate_json(
+        (FIXTURES / "policies/runbook-v3.json").read_text()
+    )
+    assert PolicyDefinition.model_validate(active["definition"]) == expected
+    assert active["source_kind"] == "gemini_pdf_extraction"
+    assert (
+        active["source_hash"]
+        == hashlib.sha256((FIXTURES / "dlq-runbook-v3.pdf").read_bytes()).hexdigest()
+    )
+    assert active["extracted_policy_hash"] == policy_definition_hash(expected)
+    assert any(e["policy_version"] == "runbook-v3" for e in policies["approval_events"])
+    _verify_firestore(project, runs)
 
 
 @pytest.mark.gcp
@@ -276,6 +343,10 @@ def test_deployed_vertical_slice_uses_real_transport_and_model():
         assert health["model_provider"].startswith("Google ADK / ")
         assert "fixture" not in health["model_provider"].lower()
         assert health["synthetic_data"] and health["simulated_downstream"]
+        existing = os.getenv("RETRYPERMIT_VERIFY_EXISTING_RUN_IDS", "")
+        if existing:
+            _revalidate_existing(client, project, existing.split(","))
+            return
         assert client.post("/api/demo/reset", json={}).status_code == 401
         assert (
             client.post(
@@ -324,18 +395,4 @@ def test_deployed_vertical_slice_uses_real_transport_and_model():
             e["policy_version"] == "runbook-v3" for e in policies["approval_events"]
         )
 
-    # Independent Firestore reads prove durable state rather than trusting API counters.
-    db = firestore.Client(project=project)
-    for run_id, version, keys in runs:
-        ref = db.collection("demo_runs").document(run_id)
-        record = ref.get().to_dict()
-        assert record["status"] == "COMPLETE"
-        assert record["active_policy_version"] == version
-        assert len(list(ref.collection("messages").stream())) == 12
-        effects = list(ref.collection("downstream_effects").stream())
-        assert len(effects) == 9
-        assert {effect.id for effect in effects} == keys
-        print(
-            f"Independent Firestore proof: {run_id}; 12 messages, 9 unique effects, COMPLETE.",
-            flush=True,
-        )
+    _verify_firestore(project, runs)

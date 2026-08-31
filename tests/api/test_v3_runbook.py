@@ -137,3 +137,20 @@ def test_v3_extract_approve_activate_full_flow_is_fake_only(inject_failure):
         old = next(p for p in policies if p["definition"]["version"] == "runbook-v1")
         assert old["definition"] == before["definition"]
         assert old["extracted_policy_hash"] == before["extracted_policy_hash"]
+        runtime = client.app.state.runtime
+        completed = client.portal.call(runtime.store.get_run, stats["run_id"])
+        assert completed.status.value == "COMPLETE"
+        assert completed.completed_at is not None
+        assert client.post("/api/demo/reset", headers=HEADERS).status_code == 200
+        archived = client.portal.call(runtime.store.get_run, stats["run_id"])
+        assert archived.status.value == "INACTIVE"
+        assert archived.active is False
+        assert archived.completed_at == completed.completed_at
+        assert (
+            len(
+                client.portal.call(
+                    runtime.store.list_downstream_effects, stats["run_id"]
+                )
+            )
+            == 9
+        )
