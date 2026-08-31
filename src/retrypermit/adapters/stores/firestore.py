@@ -299,6 +299,20 @@ class FirestoreStore:
 
             tenant_data = tenant_snapshot.to_dict() or {}
             previous_version = tenant_data.get("active_policy_version")
+            if previous_version != version:
+                # Read runs in the same transaction as the policy pointer. Run
+                # start reads that pointer and writes its run, so a concurrent
+                # start/activation cannot strand work between policy versions.
+                query = self._client.collection("demo_runs").where(
+                    filter=FieldFilter("tenant_id", "==", tenant_id)
+                )
+                snapshots = await transaction.get(query)
+                async for snapshot in snapshots:
+                    run = _load(DemoRun, snapshot.to_dict())
+                    if run.active and run.status == RunStatus.RUNNING:
+                        raise RunConflictError(
+                            "policy activation is blocked until the active run completes"
+                        )
             previous_ref = None
             previous = None
             if previous_version and previous_version != version:
@@ -347,13 +361,17 @@ class FirestoreStore:
 
         return await activate(self._client.transaction())
 
-    async def get_active_policy(self, tenant_id: str) -> PolicyVersion:
+    async def get_active_policy_version(self, tenant_id: str) -> str:
         tenant_snapshot = await self._tenant_ref(tenant_id).get()
         tenant_data = tenant_snapshot.to_dict() or {}
         version = tenant_data.get("active_policy_version")
         if not version:
             raise PolicyNotActiveError(f"tenant {tenant_id} has no active policy")
-        snapshot = await self._policy_ref(tenant_id, str(version)).get()
+        return str(version)
+
+    async def get_active_policy(self, tenant_id: str) -> PolicyVersion:
+        version = await self.get_active_policy_version(tenant_id)
+        snapshot = await self._policy_ref(tenant_id, version).get()
         if not snapshot.exists:
             raise PolicyNotActiveError("active policy pointer is inconsistent")
         policy = _load(PolicyVersion, snapshot.to_dict())
@@ -612,7 +630,9 @@ class FirestoreStore:
 
         return await update(self._client.transaction())
 
-    async def mark_run_running(self, run_id: str) -> DemoRun:
+    async def mark_run_running(
+        self, run_id: str, *, inject_failure: bool | None = None
+    ) -> DemoRun:
         run_ref = self._run_ref(run_id)
 
         @async_transactional
@@ -624,11 +644,33 @@ class FirestoreStore:
             run = _load(DemoRun, snapshot.to_dict())
             if not run.active:
                 raise RunConflictError("inactive runs cannot be started")
+            if (
+                inject_failure is not None
+                and run.status != RunStatus.READY
+                and inject_failure != run.inject_failure
+            ):
+                raise RunConflictError(
+                    "a started run must retain its failure-injection setting"
+                )
             if run.status == RunStatus.COMPLETE:
                 return run
+            tenant_snapshot = await self._tenant_ref(run.tenant_id).get(
+                transaction=transaction
+            )
+            if (tenant_snapshot.to_dict() or {}).get(
+                "active_policy_version"
+            ) != run.active_policy_version:
+                raise RunConflictError(
+                    "the run's policy is no longer active; reset before starting"
+                )
             updated = run.model_copy(
                 update={
                     "status": RunStatus.RUNNING,
+                    "inject_failure": (
+                        inject_failure
+                        if inject_failure is not None
+                        else run.inject_failure
+                    ),
                     "started_at": run.started_at or now,
                     "updated_at": now,
                 }

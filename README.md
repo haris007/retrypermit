@@ -322,7 +322,13 @@ Per-message Cloud Tasks and a Scheduler recovery net solve different problems. T
 
 Finally, an operations console is part of the control system. Showing the policy clause, repair diff, transition history, receipts, and independent effect count lets a reviewer understand why an autonomous action was safe.
 
-### Verification status
+### Latest readiness check — August 31, 2026
+
+The three local reliability fixes are implemented: policy changes cannot strand a RUNNING run, workers revalidate authority before using cached policy definitions, and Start safely resumes partial publication with its original failure mode. **63 tests passed, 2 cloud-only tests skipped**; lint, formatting, TypeScript/Vite build and the three-run freeze gate passed. See [ADR-017](docs/decisions.md) and the [test matrix](docs/phase5-test-matrix.md).
+
+Authorized read-only cloud inspection found healthy revision `retrypermit-00019-9qf`, with twelve-message support, but not these new fixes. Its existing active-v2 run finished 6 replayed / 5 escalated / 1 quarantined, not the expected 9/2/1. The stored v2 policy lacks the transient-deferral clause and safely escalates those messages. Final acceptance needs deployment approval and a new, correctly approved policy version. No Gemini call or cloud mutation was made during this inspection; `cloud_deployment_verified` remains false.
+
+### Historical verification status
 
 As of 2026-08-27, the Phase 5 local verification is complete and Phase 2 has historical cloud evidence:
 

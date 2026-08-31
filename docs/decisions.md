@@ -188,6 +188,34 @@ Rewriting the stored documents with recomputed hashes was rejected. That would m
 
 A production system needs an explicit policy-migration step: version the definition schema, and on a breaking change require re-extraction and re-approval through the audited path rather than silently rehashing. Deleting and reseeding is acceptable here only because every policy is synthetic and checked in.
 
+## ADR-017 — Transactional run starts and policy authority revalidation
+
+**Status:** Implemented and locally verified; owner approved final deployment and acceptance on August 31
+**Date:** 2026-08-31
+
+Three submission-readiness regressions were reproduced and fixed without enabling cloud adapters in development. Policy activation now rejects a version change while an active tenant run is RUNNING, in the same MemoryStore lock or Firestore transaction that changes the policy pointer. Re-selecting the same version remains idempotent. A READY run may precede a policy change, but its start is fenced by the active pointer and requires reset onto the new policy. Firestore start reads the tenant pointer and writes the run transactionally, coordinating with activation and reset.
+
+Policy definitions remain cached by immutable tenant/version, but every authorization lookup first reads the authoritative active version. A mismatch clears the cache and fails closed. This supersedes ADR-014's process-local cache invalidation as the sole freshness mechanism and adds a small authoritative store read rather than caching authorization.
+
+The Start route now selects the failure-injection mode and moves READY to RUNNING in one store operation. Repeating Start after partial publication preserves the original mode and start timestamp; a conflicting mode is rejected before publication. Duplicate delivery remains expected and the existing replay/effect ledgers remain authoritative.
+
+Local validation: **63 passed, 2 skipped**, Ruff lint/format passed, TypeScript/Vite build passed, and all three freeze scenarios passed in 10.017, 10.024 and 10.022 seconds. The two skips remain live-cloud tests. Regression coverage includes both serialized start/activation orders, deferred and ambiguous-effect policy guards, a second worker's stale cache, partial publish/resume for both failure modes, and store lifecycle contracts. The Firestore contract tests use an explicit non-network double; they do not prove real transaction isolation.
+
+The owner authorized final cloud verification, but not redeployment. Read-only inspection found revision `retrypermit-00019-9qf` (August 29), healthy with Firestore and ADK/Gemini 3.7 Flash, `cloud_deployment_verified=false`, and a service-level maximum of one instance. Its existing v2 run `run_e07d63530a45412aae397ebd44f7b339` had 12 messages, 6 replayed, 5 escalated and 1 quarantined. The stored v2 policy contains only RP-A-1 and RP-SAFE-STOP; Class B messages cite RP-SAFE-STOP and end with ACTION_MISMATCH. Stored v1 has the four-class clauses. A new immutable approved policy version is needed before claiming the expected v2 9/2/1 outcome. Do not overwrite/re-hash the old approved version or relabel this run as successful acceptance.
+
+No model call, agent run, policy mutation or deployment occurred during that inspection. The owner subsequently approved pushing and deploying the fixes, creating a separately approved v3, and full live acceptance. That authorization does not turn local tests into cloud evidence.
+
+## ADR-018 — Separate four-class v3 source and complete proposal context
+
+**Status:** Implemented; 66 local tests pass, two cloud tests await explicit execution
+**Date:** 2026-08-31
+
+The historical v2 PDF and expanded v2 JSON had drifted. The generic fake extractor always returned v2 JSON, so passing local upload tests did not establish that the PDF contained those clauses. Preserve existing immutable policies. Generate a separate v3 PDF from its reviewed JSON with a canonical appendix. Match exact bundled v3 bytes in the deterministic extractor and require real cloud extraction to match the reviewed definition and source hash before approval.
+
+The production proposal prompt still described Phase 1 only and lacked active-policy currency/cap context. It now describes all four classes and receives the approved currencies and effective cap from the active validated policy. The fake provider consumes the same currency context. Neither change grants model execution authority; deterministic validation, repair allowlists and effect ledgers remain authoritative.
+
+The cloud acceptance test is explicitly opt-in, preserves every existing policy fingerprint, tests protected endpoints, real PDF extraction and pending approval, v1 lost-response and v3 clean runs, policy-switch rejection while deferred, per-message recheck transitions, C/D zero-effect behavior, repeat-Start idempotency, and independent Firestore effect counts. Production rechecks remain 300 seconds.
+
 ## Truthful claim checklist
 
 The following statements remain false until the corresponding evidence exists:
@@ -206,8 +234,8 @@ The following statements remain false until the corresponding evidence exists:
 - [x] “Policy v2 changes behavior without code” — the local end-to-end test escalates the $750 order under v1 and replays all six after audited v2 activation.
 - [x] “PDF policy extraction is live” — a credentialed ADK/Gemini PDF call produced strict runbook v2, and the deployed approval/activation acceptance path passed.
 - [x] “Phase 3 Class B/C/D behavior works locally” — deterministic fixture tests prove scheduled deferral/recheck/replay, withheld escalation, quarantine/refusal, and zero effects for Classes C and D.
-- [ ] “Phase 3 works in the deployed cloud path” — intentionally not reverified because this phase was authorized for local fake-model execution only.
+- [ ] “Phase 3 works in the deployed cloud path” — the August 31 inspection found twelve-message support, but the active-v2 run did not meet the expected outcome; final acceptance is pending policy correction and deployment approval.
 - [x] “Phase 4 is locally frozen” — three real-cadence runs completed in about 10.02 seconds each with identical outcomes, including injected failure and active v2.
-- [ ] “Phase 4 works in the deployed cloud path” — intentionally not verified because no final cloud verification run was authorized.
+- [ ] “Phase 4 works in the deployed cloud path” — final verification is authorized, but the latest reliability fixes require a separately approved deployment before acceptance.
 
 Always say “at-least-once delivery with effectively-once downstream business effects.” Never shorten this into an exactly-once-delivery claim. Always disclose synthetic data, the simulated downstream, and whether the current run is local or Google Cloud.

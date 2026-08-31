@@ -130,6 +130,36 @@ def main() -> None:
             )
         )
 
+        # The new PDF is a separate authority; never overwrite historical v2.
+        pdf_path = Path("fixtures/dlq-runbook-v3.pdf")
+        with pdf_path.open("rb") as pdf_file:
+            extracted = _require_ok(
+                client.post(
+                    "/api/policies/extract",
+                    headers=ADMIN_HEADERS,
+                    files={"file": (pdf_path.name, pdf_file, "application/pdf")},
+                ),
+                "extract v3",
+            )
+        assert extracted["policy"]["definition"]["version"] == "runbook-v3"
+        for action in ("approve", "activate"):
+            _require_ok(
+                client.post(
+                    f"/api/policies/runbook-v3/{action}",
+                    headers=ADMIN_HEADERS,
+                    json={"actor": "phase4-freeze-gate"},
+                ),
+                f"{action} v3",
+            )
+        runs.append(
+            _run_scenario(
+                client,
+                name="selected-v3",
+                endpoint="/api/demo/start",
+                expected_policy="runbook-v3",
+            )
+        )
+
     outcomes = [run["outcome"] for run in runs]
     assert outcomes[1:] == outcomes[:-1], outcomes
     print(

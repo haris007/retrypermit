@@ -96,8 +96,11 @@ async def _start_active_demo(
     runtime: Runtime, *, trace_id: str, inject_failure: bool
 ) -> DemoActionResponse:
     run = await runtime.demo.get_active()
-    run = await runtime.store.set_run_inject_failure(run.run_id, inject_failure)
-    await runtime.store.mark_run_running(run.run_id)
+    # Starting and selecting failure mode must be one atomic operation. A
+    # partial publication may resume, but cannot change an in-flight run's mode.
+    run = await runtime.store.mark_run_running(
+        run.run_id, inject_failure=inject_failure
+    )
     current = await runtime.store.list_messages(run.run_id)
     local_inbox_ids: list[str] = []
 

@@ -173,6 +173,15 @@ class MemoryStore:
                 raise PolicyValidationError("only an approved policy can be activated")
             now = self._clock.now()
             previous_version = self._active_policy.get(tenant_id)
+            if previous_version != version and any(
+                run.tenant_id == tenant_id
+                and run.active
+                and run.status == RunStatus.RUNNING
+                for run in self._runs.values()
+            ):
+                raise RunConflictError(
+                    "policy activation is blocked until the active run completes"
+                )
             if previous_version and previous_version != version:
                 previous_key = (tenant_id, previous_version)
                 previous = self._policies[previous_key]
@@ -200,6 +209,13 @@ class MemoryStore:
                     )
                 )
             return _copy(activated)
+
+    async def get_active_policy_version(self, tenant_id: str) -> str:
+        async with self._lock:
+            version = self._active_policy.get(tenant_id)
+            if version is None:
+                raise PolicyNotActiveError(f"tenant {tenant_id} has no active policy")
+            return version
 
     async def get_active_policy(self, tenant_id: str) -> PolicyVersion:
         async with self._lock:
@@ -354,17 +370,36 @@ class MemoryStore:
             self._runs[run_id] = updated
             return _copy(updated)
 
-    async def mark_run_running(self, run_id: str) -> DemoRun:
+    async def mark_run_running(
+        self, run_id: str, *, inject_failure: bool | None = None
+    ) -> DemoRun:
         async with self._lock:
             run = self._run_locked(run_id)
             if not run.active:
                 raise RunConflictError("inactive runs cannot be started")
+            if (
+                inject_failure is not None
+                and run.status != RunStatus.READY
+                and inject_failure != run.inject_failure
+            ):
+                raise RunConflictError(
+                    "a started run must retain its failure-injection setting"
+                )
             if run.status == RunStatus.COMPLETE:
                 return _copy(run)
+            if self._active_policy.get(run.tenant_id) != run.active_policy_version:
+                raise RunConflictError(
+                    "the run's policy is no longer active; reset before starting"
+                )
             now = self._clock.now()
             updated = run.model_copy(
                 update={
                     "status": RunStatus.RUNNING,
+                    "inject_failure": (
+                        inject_failure
+                        if inject_failure is not None
+                        else run.inject_failure
+                    ),
                     "started_at": run.started_at or now,
                     "updated_at": now,
                 }

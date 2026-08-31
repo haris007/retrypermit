@@ -49,6 +49,21 @@ This matrix maps the Phase 5 acceptance checklist to executable tests. The norma
 | Policy cache invalidation | `tests/unit/test_phase4_performance.py::test_active_policy_is_cached_and_explicitly_invalidated` |
 | No raw HTML injection sink | `tests/unit/test_phase3_outcomes.py::test_frontend_has_no_raw_html_injection_sink` |
 
+## Submission-readiness regression checks (August 31)
+
+The normal suite now reports **66 passed, 2 skipped**. Network connections were blocked during local verification. The new `tests/api/test_v3_runbook.py` covers exact fixture selection, full v3 approval/activation, both run modes, genuine deferred/recheck transitions, and active-policy context sent to the model.
+
+| Requirement | Test evidence |
+| --- | --- |
+| Reject a policy switch while a message is deferred or an effect is ambiguous; retain resumability | `tests/api/test_submission_reliability.py` policy-switch tests |
+| Revalidate a second worker's cached policy; fence a stale READY run | `test_second_worker_revalidates_cached_policy_and_ready_run_must_reset` |
+| Preserve original mode and start time after partial publication; no duplicate effects | `test_start_resumes_after_partial_publication_and_preserves_effects`, both injection modes |
+| Start and policy activation cannot both win | `test_start_and_policy_activation_cannot_both_win`, both operation orders |
+| Memory/Firestore lifecycle contracts and read-before-write ordering | `tests/store_contract/test_lifecycle_guards.py` |
+| Cache immutable definitions while checking current authority | Updated `tests/unit/test_phase4_performance.py` cache test |
+
+The Firestore lifecycle tests use a non-network transaction double. Real Firestore isolation, cloud transport, and the live model still require the gated integration tests. Read-only inspection of the August 29 cloud revision did not exercise these newly fixed paths.
+
 ## Gated integration checks
 
 | Test | Why it cannot run locally |

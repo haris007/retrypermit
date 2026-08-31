@@ -26,6 +26,8 @@ async def test_real_adk_gemini_structured_triage() -> None:
         payload=seed.payload,
         policy_version=policy.version,
         allowed_repairs=policy.definition.migration_rules,
+        approved_currencies=policy.definition.approved_currencies,
+        effective_replay_cap=str(policy.definition.effective_replay_cap),
         clause_ids=[item.clause_id for item in policy.definition.clauses],
         policy_clauses=[
             PolicyClauseContext(

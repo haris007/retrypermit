@@ -251,6 +251,8 @@ class RetryPermitOrchestrator:
             payload=message.original_payload,
             policy_version=policy.version,
             allowed_repairs=policy.definition.migration_rules,
+            approved_currencies=policy.definition.approved_currencies,
+            effective_replay_cap=str(policy.definition.effective_replay_cap),
             clause_ids=[clause.clause_id for clause in policy.definition.clauses],
             policy_clauses=[
                 PolicyClauseContext(
@@ -951,6 +953,14 @@ class RetryPermitOrchestrator:
         self._log_receipt(result_receipt, state=MessageState.REPLAYED)
 
     async def _active_policy_for(self, message: MessageRecord) -> PolicyVersion:
+        # Cache immutable definitions, never authority. Another worker may have
+        # activated a different policy without invalidating this process's cache.
+        active_version = await self._store.get_active_policy_version(message.tenant_id)
+        if active_version != message.active_policy_version:
+            self.invalidate_policy_cache()
+            raise RunConflictError(
+                "the run's policy is no longer active; deterministic replanning is required"
+            )
         cache_key = (message.tenant_id, message.active_policy_version)
         cached = self._policy_cache.get(cache_key)
         if cached is not None:

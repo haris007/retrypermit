@@ -53,7 +53,14 @@ def test_active_policy_is_cached_and_explicitly_invalidated() -> None:
         await demo.bootstrap()
         run = await demo.reset(run_id="phase4-policy-cache")
         original_get_active_policy = store.get_active_policy
+        original_get_active_version = store.get_active_policy_version
         calls = 0
+        authority_checks = 0
+
+        async def counted_active_version(tenant_id: str):
+            nonlocal authority_checks
+            authority_checks += 1
+            return await original_get_active_version(tenant_id)
 
         async def counted_get_active_policy(tenant_id: str):
             nonlocal calls
@@ -61,6 +68,7 @@ def test_active_policy_is_cached_and_explicitly_invalidated() -> None:
             return await original_get_active_policy(tenant_id)
 
         store.get_active_policy = counted_get_active_policy  # type: ignore[method-assign]
+        store.get_active_policy_version = counted_active_version  # type: ignore[method-assign]
         orchestrator = RetryPermitOrchestrator(
             store,
             DeterministicFakeModelProvider(),
@@ -70,9 +78,12 @@ def test_active_policy_is_cached_and_explicitly_invalidated() -> None:
         await orchestrator.run_message(run.run_id, "synthetic-order-001")
         await orchestrator.run_message(run.run_id, "synthetic-order-002")
         assert calls == 1
+        assert authority_checks >= 2
+        previous_checks = authority_checks
 
         orchestrator.invalidate_policy_cache()
         await orchestrator.run_message(run.run_id, "synthetic-order-003")
         assert calls == 2
+        assert authority_checks > previous_checks
 
     asyncio.run(scenario())

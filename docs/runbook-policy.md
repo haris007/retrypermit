@@ -33,6 +33,12 @@ The PDF extractor returns the same strict `PolicyDefinition` structure used by t
 
 Approval and activation are separate administrator-protected operations. Each creates an append-only audit event containing actor, timestamp, and version information. Startup seeds v1 only if no active policy exists, so a Cloud Run cold start cannot silently reactivate an old version.
 
+## Run and worker safety
+
+A different policy cannot be activated while the active tenant run is RUNNING. The store checks this transactionally; a rejected activation leaves the previous version and audit events unchanged. Re-selecting the same version is safe. If a policy changes while a seeded run is still READY, reset before Start so the new run is bound to the new policy.
+
+Workers cache immutable definitions, not authorization. Each policy lookup checks the authoritative active version, including on a cache hit. Run start verifies the same pointer transactionally. Partial-publish retries preserve the run's existing failure-injection mode and start timestamp.
+
 ## Effective safety cap
 
 The runbook cap and the application ceiling are independent. The effective cap is:
@@ -53,7 +59,11 @@ PDF text and message strings are untrusted data. Instruction-like text cannot ad
 - `fixtures/policies/runbook-v2.json` demonstrates an audited policy change for the Phase 2 fixture.
 - `fixtures/dlq-runbook-v2.pdf` exercises strict PDF extraction into a pending policy.
 
-Both current production-oriented JSON policies use a 300-second Class B transient recheck. Local demo mode uses an explicit 10-second override. That override is a disclosed rehearsal convenience and must not be presented as production behavior.
+- `fixtures/policies/runbook-v3.json` and `fixtures/dlq-runbook-v3.pdf` are the new four-class source and exact fake fixture. The PDF is reproducibly generated from the JSON by `scripts/build_runbook_v3_pdf.py` (ReportLab authoring dependency).
+
+The historical v2 PDF contains fewer clauses than its later JSON fixture and the old deployed v2 must not be presented as the complete four-class policy. It is preserved, not overwritten. Use the separately versioned v3 PDF for new cloud extraction. The acceptance test compares the real extracted definition and source hash to reviewed v3 before approval. The fake extractor recognizes exact bundled v3 PDF bytes; it does not parse arbitrary PDFs or prove Gemini behavior.
+
+All three current JSON policies use a 300-second Class B transient recheck. Local demo mode uses an explicit 10-second override. That override is a disclosed rehearsal convenience and must not be presented as production behavior.
 
 ## Operator checklist
 
@@ -63,5 +73,6 @@ Both current production-oriented JSON policies use a 300-second Class B transien
 4. Confirm retry budget and transient recheck cadence.
 5. Review embedded text as untrusted content.
 6. Approve with an attributable actor.
-7. Activate separately and verify the previous/new version event.
-8. Run a synthetic acceptance case and inspect receipts before using the version broadly.
+7. Wait for the active run to complete before activating a different version.
+8. Activate separately, verify the previous/new version event, then reset to seed a run under the new policy.
+9. Run a synthetic acceptance case and inspect receipts before using the version broadly. Existing approved versions are immutable: corrections require a new version, not silent rehashing.

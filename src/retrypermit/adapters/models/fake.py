@@ -66,7 +66,9 @@ class DeterministicFakeModelProvider:
             and item["quantity"] < 0
             for item in products
         )
-        currency_not_allowed = str(payload.get("currency", "")).upper() != "USD"
+        currency_not_allowed = str(payload.get("currency", "")).upper() not in (
+            request.approved_currencies or ["USD"]
+        )
         if has_negative_quantity or currency_not_allowed:
             proposed_fix = (
                 "Confirm the intended non-negative quantity and resubmit the order."

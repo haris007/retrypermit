@@ -86,3 +86,5 @@ class TriageRequest(BaseModel):
     allowed_repairs: list[Repair]
     clause_ids: list[str]
     policy_clauses: list[PolicyClauseContext]
+    approved_currencies: list[str] = Field(default_factory=list)
+    effective_replay_cap: str | None = None
