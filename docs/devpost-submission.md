@@ -55,7 +55,7 @@ The hackathon deployment intentionally limits Cloud Run to one instance and uses
 
 ## Submission fields still requiring owner evidence
 
-- **Live project URL:** `https://retrypermit-vm5aevgdva-uc.a.run.app` was healthy on August 31, revision `retrypermit-00019-9qf`, with twelve-message support. It is not final acceptance evidence: the new reliability fixes are not deployed, and the existing v2 run is 6 replayed / 5 escalated / 1 quarantined because the stored v2 policy lacks the deferral clause. Deploy the verified fixes only with owner authorization and use a newly versioned, correctly approved runbook before updating these claims.
+- **Live project URL:** https://retrypermit-vm5aevgdva-uc.a.run.app - verified August 31; current revision `retrypermit-00021-szl`, real ADK/Gemini 3.7 Flash, Firestore, and approved v3. Two live runs each achieved 9 replayed / 2 escalated / 1 quarantined, with independent effect checks. Read the [verification report](final-verification-2026-08-31.md), including its transparent test-correction note.
 - **Repository URL:** `https://github.com/haris007/retrypermit` — public and MIT licensed. Reopen it signed out after the final push and confirm the submitted branch contains the phase you describe.
 - **Public video URL:** add after recording; verify while signed out and confirm duration is no more than four minutes.
 - **Contest-period statement:** owner must confirm the project was newly created during the eligible submission period, that AI coding assistants were used, and that no undisclosed pre-existing code was incorporated.

@@ -207,7 +207,7 @@ No model call, agent run, policy mutation or deployment occurred during that ins
 
 ## ADR-018 — Separate four-class v3 source and complete proposal context
 
-**Status:** Implemented; 66 local tests pass, two cloud tests await explicit execution
+**Status:** Deployed and live-verified under owner authorization; 66 local tests pass
 **Date:** 2026-08-31
 
 The historical v2 PDF and expanded v2 JSON had drifted. The generic fake extractor always returned v2 JSON, so passing local upload tests did not establish that the PDF contained those clauses. Preserve existing immutable policies. Generate a separate v3 PDF from its reviewed JSON with a canonical appendix. Match exact bundled v3 bytes in the deterministic extractor and require real cloud extraction to match the reviewed definition and source hash before approval.
@@ -215,6 +215,12 @@ The historical v2 PDF and expanded v2 JSON had drifted. The generic fake extract
 The production proposal prompt still described Phase 1 only and lacked active-policy currency/cap context. It now describes all four classes and receives the approved currencies and effective cap from the active validated policy. The fake provider consumes the same currency context. Neither change grants model execution authority; deterministic validation, repair allowlists and effect ledgers remain authoritative.
 
 The cloud acceptance test is explicitly opt-in, preserves every existing policy fingerprint, tests protected endpoints, real PDF extraction and pending approval, v1 lost-response and v3 clean runs, policy-switch rejection while deferred, per-message recheck transitions, C/D zero-effect behavior, repeat-Start idempotency, and independent Firestore effect counts. Production rechecks remain 300 seconds.
+
+### August 31 final execution result
+
+Application commit `561b513` was deployed as `retrypermit-00020-gvk`. Both fresh cloud runs completed 9 replayed / 2 escalated / 1 quarantined, including scheduled five-minute rechecks. Real PDF extraction matched reviewed v3 before approval; old v2 remained immutable. The final Firestore test asserted COMPLETE for an already archived run and failed. This test-only error was corrected to require INACTIVE with preserved completion timestamp for the first run and COMPLETE for the current run. Local archive-preservation coverage passed; read-only revalidation of the same runs then passed with 12 messages and 9 effects each. No extra model calls or runs were used for that continuation.
+
+Revision `retrypermit-00021-szl` changes only the verified flag on the same image. Health reports true. See [final verification](final-verification-2026-08-31.md) for actual command results, scope limits and submission items still outstanding.
 
 ## Truthful claim checklist
 
@@ -234,8 +240,8 @@ The following statements remain false until the corresponding evidence exists:
 - [x] “Policy v2 changes behavior without code” — the local end-to-end test escalates the $750 order under v1 and replays all six after audited v2 activation.
 - [x] “PDF policy extraction is live” — a credentialed ADK/Gemini PDF call produced strict runbook v2, and the deployed approval/activation acceptance path passed.
 - [x] “Phase 3 Class B/C/D behavior works locally” — deterministic fixture tests prove scheduled deferral/recheck/replay, withheld escalation, quarantine/refusal, and zero effects for Classes C and D.
-- [ ] “Phase 3 works in the deployed cloud path” — the August 31 inspection found twelve-message support, but the active-v2 run did not meet the expected outcome; final acceptance is pending policy correction and deployment approval.
+- [x] “Phase 3 works in the deployed cloud path” — August 31 v1/v3 acceptance proved all four classes, actual scheduled rechecks and independent effect counts.
 - [x] “Phase 4 is locally frozen” — three real-cadence runs completed in about 10.02 seconds each with identical outcomes, including injected failure and active v2.
-- [ ] “Phase 4 works in the deployed cloud path” — final verification is authorized, but the latest reliability fixes require a separately approved deployment before acceptance.
+- [x] “Phase 4 works in the deployed cloud path” — owner-approved deployment and final verification completed; see the August 31 report.
 
 Always say “at-least-once delivery with effectively-once downstream business effects.” Never shorten this into an exactly-once-delivery claim. Always disclose synthetic data, the simulated downstream, and whether the current run is local or Google Cloud.

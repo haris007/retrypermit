@@ -324,9 +324,11 @@ Finally, an operations console is part of the control system. Showing the policy
 
 ### Latest readiness check — August 31, 2026
 
-The three local reliability fixes are implemented: policy changes cannot strand a RUNNING run, workers revalidate authority before using cached policy definitions, and Start safely resumes partial publication with its original failure mode. **63 tests passed, 2 cloud-only tests skipped**; lint, formatting, TypeScript/Vite build and the three-run freeze gate passed. See [ADR-017](docs/decisions.md) and the [test matrix](docs/phase5-test-matrix.md).
+The reliability fixes are deployed: policy changes cannot strand a RUNNING run, workers revalidate authority before using cached definitions, and Start resumes partial publication with its original mode. The proposal context now covers all four classes and the active currency/cap limits. **66 local tests passed, 2 cloud-only tests skipped by default**; lint, formatting, TypeScript/Vite and four fake-only freeze scenarios passed.
 
-Authorized read-only cloud inspection found healthy revision `retrypermit-00019-9qf`, with twelve-message support, but not these new fixes. Its existing active-v2 run finished 6 replayed / 5 escalated / 1 quarantined, not the expected 9/2/1. The stored v2 policy lacks the transient-deferral clause and safely escalates those messages. Final acceptance needs deployment approval and a new, correctly approved policy version. No Gemini call or cloud mutation was made during this inspection; `cloud_deployment_verified` remains false.
+With explicit owner approval, real ADK/Gemini triage, PDF extraction, v3 approval/activation and two full cloud workflows were exercised. Both runs finished **9 replayed / 2 escalated / 1 quarantined**, with three real five-minute rechecks and nine independently verified Firestore effects each. The lost-response case proved two requests and one effect. Historical v2 was preserved; separately extracted v3 is active. Current revision `retrypermit-00021-szl` uses the tested image and reports `cloud_deployment_verified=true`.
+
+The initial test command caught an incorrect assertion about archived runs; after correcting it locally, the same completed runs passed read-only evidence revalidation. See the [full report and honest test accounting](docs/final-verification-2026-08-31.md), [ADR-018](docs/decisions.md) and [test matrix](docs/phase5-test-matrix.md). The final public video, owner declarations and Devpost submission are still outstanding.
 
 ### Historical verification status
 
@@ -367,14 +369,14 @@ These are intentionally unchecked; they must not be converted into claims withou
 - [ ] Contest-period creation and any prior-work disclosure are confirmed.
 - [x] Exactly one category is selected in the draft: **Taskmaster**.
 - [x] Gemini 3.5+, Google ADK, and Google Cloud infrastructure are genuinely implemented in the preserved production path.
-- [ ] Phase 3/4 final cloud verification is explicitly authorized and passes.
+- [x] Phase 3/4 final cloud verification is explicitly authorized and completed; see the August 31 report, including the corrected test assertion.
 - [ ] Public English video is no more than four minutes, shows live execution and Google Cloud proof, and opens signed out.
-- [ ] Repository URL opens for a stranger or judge access is granted.
+- [x] Repository URL is public; public metadata and signed-out access were checked.
 - [x] Step-by-step setup and architecture/state/sequence/security diagrams are present.
 - [x] Synthetic data, simulated downstream, local override, and test/video limitations are disclosed.
 - [ ] Every third-party asset and dependency is appropriately licensed for submission and distribution.
 - [ ] Secret scan and final repository review confirm no credentials or employer data are committed.
-- [ ] Final local and authorized cloud test counts are recorded honestly.
+- [x] Final local and authorized cloud test counts are recorded honestly in the August 31 report.
 - [ ] Hosted/test link and credentials are supplied separately from deployment proof.
 - [ ] Every submitted link is reopened signed out; the submission is reopened once and saved again.
 - [ ] The RetryPermit name completes trademark, company-name, package-registry, app-store, and domain clearance before commercial release.
