@@ -210,11 +210,12 @@ Application settings are read from environment variables (or `.env` locally):
 | `GEMINI_MODEL` | `gemini-3.7-flash` | Configurable Gemini model identifier. |
 | `CLOUD_RUN_REGION` | `us-central1` | Cloud Run infrastructure region. |
 | `PUBSUB_TOPIC` | `orders.dlq` | Synthetic dead-letter topic. |
+| `PUBSUB_SUBSCRIPTION` | required in cloud mode | Exact allowed Pub/Sub subscription resource path. |
 | `CLOUD_TASKS_LOCATION` | `us-central1` | Task queue region. |
 | `CLOUD_TASKS_QUEUE` | `retrypermit-processing` | Durable processing queue. |
 | `SERVICE_BASE_URL` | required in cloud mode | Deployed Cloud Run base URL used by tasks. |
 | `OIDC_AUDIENCE` | required in cloud mode | Expected base Cloud Run URL audience. |
-| `PUBSUB_PUSH_SERVICE_ACCOUNT` | required in cloud mode | Exact allowed Pub/Sub push identity. |
+| `PUBSUB_PUSH_SERVICE_ACCOUNT` | required in cloud mode | Exact allowed Pub/Sub push identity; checked together with the subscription path. |
 | `CLOUD_TASKS_SERVICE_ACCOUNT` | required in cloud mode | Exact allowed task worker identity. |
 | `RECOVERY_SERVICE_ACCOUNT` | required in cloud mode | Exact allowed scheduler/recovery identity. |
 | `REPLAY_RETRY_BASE_SECONDS` | `1` | Base delay for bounded exponential replay retry. |

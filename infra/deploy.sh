@@ -27,6 +27,7 @@ GEMINI_LOCATION="${GEMINI_LOCATION:-global}"
 FIRESTORE_LOCATION="${FIRESTORE_LOCATION:-us-central1}"
 TASK_QUEUE="${TASK_QUEUE:-retrypermit-processing}"
 TOPIC="${TOPIC:-orders.dlq}"
+SUBSCRIPTION="${SUBSCRIPTION:-${TOPIC//./-}-push}"
 
 RUNTIME_SA="retrypermit-runtime@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
 PUSH_SA="retrypermit-pubsub@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
@@ -112,7 +113,7 @@ gcloud run deploy "${SERVICE}" --source . --region "${GCP_REGION}" \
   --project "${GCP_PROJECT_ID}" --service-account "${RUNTIME_SA}" \
   --allow-unauthenticated --min=0 --max=1 --concurrency=20 \
   --cpu=1 --memory=1Gi --timeout=300 \
-  --set-env-vars="APP_ENV=cloud,DEMO_MODE=false,USE_IN_MEMORY_STORE=false,USE_FAKE_MODEL=false,CLOUD_DEPLOYMENT_VERIFIED=false,GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID},GOOGLE_CLOUD_LOCATION=${GEMINI_LOCATION},GOOGLE_GENAI_USE_ENTERPRISE=TRUE,GEMINI_MODEL=gemini-3.7-flash,CLOUD_RUN_REGION=${GCP_REGION},PUBSUB_TOPIC=${TOPIC},CLOUD_TASKS_LOCATION=${GCP_REGION},CLOUD_TASKS_QUEUE=${TASK_QUEUE},SERVICE_BASE_URL=https://pending.invalid,OIDC_AUDIENCE=https://pending.invalid,PUBSUB_PUSH_SERVICE_ACCOUNT=${PUSH_SA},CLOUD_TASKS_SERVICE_ACCOUNT=${TASK_SA},RECOVERY_SERVICE_ACCOUNT=${RECOVERY_SA}" \
+  --set-env-vars="APP_ENV=cloud,DEMO_MODE=false,USE_IN_MEMORY_STORE=false,USE_FAKE_MODEL=false,CLOUD_DEPLOYMENT_VERIFIED=false,GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID},GOOGLE_CLOUD_LOCATION=${GEMINI_LOCATION},GOOGLE_GENAI_USE_ENTERPRISE=TRUE,GEMINI_MODEL=gemini-3.7-flash,CLOUD_RUN_REGION=${GCP_REGION},PUBSUB_TOPIC=${TOPIC},PUBSUB_SUBSCRIPTION=projects/${GCP_PROJECT_ID}/subscriptions/${SUBSCRIPTION},CLOUD_TASKS_LOCATION=${GCP_REGION},CLOUD_TASKS_QUEUE=${TASK_QUEUE},SERVICE_BASE_URL=https://pending.invalid,OIDC_AUDIENCE=https://pending.invalid,PUBSUB_PUSH_SERVICE_ACCOUNT=${PUSH_SA},CLOUD_TASKS_SERVICE_ACCOUNT=${TASK_SA},RECOVERY_SERVICE_ACCOUNT=${RECOVERY_SA}" \
   --set-secrets="DEMO_ADMIN_TOKEN=${ADMIN_SECRET}:latest" \
   --quiet
 
@@ -121,7 +122,7 @@ SERVICE_URL="$(gcloud run services describe "${SERVICE}" --region "${GCP_REGION}
 
 gcloud run services update "${SERVICE}" --region "${GCP_REGION}" \
   --project "${GCP_PROJECT_ID}" \
-  --update-env-vars="SERVICE_BASE_URL=${SERVICE_URL},OIDC_AUDIENCE=${SERVICE_URL},PUBSUB_PUSH_SERVICE_ACCOUNT=${PUSH_SA},CLOUD_TASKS_SERVICE_ACCOUNT=${TASK_SA},RECOVERY_SERVICE_ACCOUNT=${RECOVERY_SA}" \
+  --update-env-vars="SERVICE_BASE_URL=${SERVICE_URL},OIDC_AUDIENCE=${SERVICE_URL},PUBSUB_PUSH_SERVICE_ACCOUNT=${PUSH_SA},PUBSUB_SUBSCRIPTION=projects/${GCP_PROJECT_ID}/subscriptions/${SUBSCRIPTION},CLOUD_TASKS_SERVICE_ACCOUNT=${TASK_SA},RECOVERY_SERVICE_ACCOUNT=${RECOVERY_SA}" \
   --quiet
 
 for service_account in "${PUSH_SA}" "${TASK_SA}" "${RECOVERY_SA}"; do
@@ -140,7 +141,6 @@ if ! gcloud pubsub topics describe "${TOPIC}" --project "${GCP_PROJECT_ID}" --qu
   gcloud pubsub topics create "${TOPIC}" --project "${GCP_PROJECT_ID}" --quiet
 fi
 
-SUBSCRIPTION="${TOPIC//./-}-push"
 if gcloud pubsub subscriptions describe "${SUBSCRIPTION}" --project "${GCP_PROJECT_ID}" --quiet >/dev/null 2>&1; then
   gcloud pubsub subscriptions update "${SUBSCRIPTION}" \
     --push-endpoint="${SERVICE_URL}/pubsub/dlq" \

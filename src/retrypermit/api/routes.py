@@ -5,6 +5,7 @@ import base64
 import binascii
 import hashlib
 import json
+import secrets
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -33,7 +34,12 @@ from retrypermit.domain.enums import (
 from retrypermit.domain.errors import NotFoundError, PolicyValidationError
 from retrypermit.domain.receipts import Receipt
 from retrypermit.domain.state_machine import is_terminal
-from retrypermit.errors import ConflictError, DependencyUnavailable, RetryPermitError
+from retrypermit.errors import (
+    AuthorizationError,
+    ConflictError,
+    DependencyUnavailable,
+    RetryPermitError,
+)
 from retrypermit.runtime import Runtime
 
 
@@ -536,6 +542,13 @@ def register_routes(app: FastAPI) -> None:
             settings=runtime.settings,
             expected_email=runtime.settings.pubsub_push_service_account,
         )
+        if not secrets.compare_digest(
+            envelope.subscription, runtime.settings.pubsub_subscription
+        ):
+            raise AuthorizationError(
+                "The Pub/Sub subscription is not authorized.",
+                _trace_id(request),
+            )
         trace_id = _trace_id(request)
         try:
             raw = base64.b64decode(envelope.message.data, validate=True)

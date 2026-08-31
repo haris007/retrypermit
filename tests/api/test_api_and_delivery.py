@@ -24,6 +24,7 @@ def client():
         use_in_memory_store=True,
         use_fake_model=True,
         allow_local_service_auth=True,
+        pubsub_subscription="projects/demo/subscriptions/orders-dlq-push",
         demo_recheck_seconds=0.01,
         simulated_transient_recovery_seconds=0.01,
     )
@@ -191,6 +192,40 @@ def test_pubsub_and_task_routes_require_service_identity(client: TestClient) -> 
     denied = client.post("/pubsub/dlq", json=_pubsub_envelope(stats["run_id"], message))
     assert denied.status_code == 401
     assert denied.json()["error"]["code"] == "AUTH_REQUIRED"
+
+
+def test_cloud_mode_requires_a_pubsub_subscription_allowlist() -> None:
+    with pytest.raises(ValueError, match="PUBSUB_SUBSCRIPTION"):
+        Settings(
+            _env_file=None,
+            demo_mode=False,
+            use_in_memory_store=False,
+            use_fake_model=False,
+            demo_admin_token=ADMIN_TOKEN,
+            google_cloud_project="retrypermit-test",
+            service_base_url="https://retrypermit.example",
+            oidc_audience="https://retrypermit.example",
+            pubsub_push_service_account="push@retrypermit-test.iam.gserviceaccount.com",
+            cloud_tasks_service_account="tasks@retrypermit-test.iam.gserviceaccount.com",
+            recovery_service_account="recovery@retrypermit-test.iam.gserviceaccount.com",
+        )
+
+
+def test_pubsub_route_rejects_an_unapproved_subscription(
+    client: TestClient,
+) -> None:
+    stats = client.get("/api/stats").json()
+    message = client.get("/api/messages").json()["messages"][0]
+    envelope = _pubsub_envelope(stats["run_id"], message)
+    envelope["subscription"] = "projects/other/subscriptions/unapproved"
+
+    denied = client.post("/pubsub/dlq", json=envelope, headers=LOCAL_SERVICE_HEADERS)
+
+    assert denied.status_code == 403
+    assert denied.json()["error"]["code"] == "AUTH_FORBIDDEN"
+    assert denied.json()["error"]["message"] == (
+        "The Pub/Sub subscription is not authorized."
+    )
 
 
 def _run(runtime, run_id: str):

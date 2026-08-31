@@ -58,7 +58,7 @@ The agent is configured without tools. Its typed output is evidence offered to t
 
 | Caller | Target | Identity/control |
 | --- | --- | --- |
-| Pub/Sub | `/pubsub/dlq` | Dedicated push service account, Google-signed OIDC token, exact caller check |
+| Pub/Sub | `/pubsub/dlq` | Dedicated push service account, Google-signed OIDC token, exact caller and subscription-resource checks |
 | Cloud Tasks | private worker route | Dedicated task service account, OIDC audience equal to Cloud Run base URL |
 | Cloud Scheduler | `/internal/recovery/sweep` | Dedicated recovery service account and OIDC audience |
 | Cloud Run application | Firestore, Pub/Sub, Tasks, Vertex AI, Logging | Attached runtime service account with purpose-limited IAM roles |

@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     cloud_run_region: str = "us-central1"
 
     pubsub_topic: str = "orders.dlq"
+    pubsub_subscription: str = ""
     cloud_tasks_location: str = "us-central1"
     cloud_tasks_queue: str = "retrypermit-processing"
     service_base_url: str = ""
@@ -76,6 +77,7 @@ class Settings(BaseSettings):
                 "SERVICE_BASE_URL": self.service_base_url,
                 "OIDC_AUDIENCE": self.oidc_audience,
                 "PUBSUB_PUSH_SERVICE_ACCOUNT": self.pubsub_push_service_account,
+                "PUBSUB_SUBSCRIPTION": self.pubsub_subscription,
                 "CLOUD_TASKS_SERVICE_ACCOUNT": self.cloud_tasks_service_account,
                 "RECOVERY_SERVICE_ACCOUNT": self.recovery_service_account,
             }
